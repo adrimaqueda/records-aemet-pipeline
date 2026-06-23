@@ -1,0 +1,41 @@
+[project]
+name = "records-aemet"
+version = "0.1.0"
+description = "Records AEMET: pipeline que descarga datos de AEMET, calcula récords de temperatura y publica JSONs a HuggingFace."
+readme = "README.md"
+requires-python = ">=3.14"
+authors = [
+    { name = "Adrián Maqueda" }
+]
+dependencies = [
+    "duckdb>=1.1.0",
+    "httpx>=0.27.0",
+    "huggingface-hub>=0.26.0",
+    "polars>=1.18.0",
+    "pyarrow>=18.0.0",
+    "python-dotenv>=1.0.0",
+    "tenacity>=9.0.0",
+]
+
+[project.scripts]
+extremos-backfill = "extremos.backfill:main"
+extremos-fetch    = "extremos.fetch:main"
+extremos-provisional = "extremos.provisional:main"
+extremos-records  = "extremos.records:main"
+extremos-export   = "extremos.export:main"
+extremos-stats    = "extremos.stats:main"
+extremos-rankings = "extremos.rankings:main"
+extremos-publish  = "extremos.publish:main"
+extremos-backup   = "extremos.backup:main"
+extremos-daily    = "extremos.daily:main"
+
+[build-system]
+requires = ["uv_build>=0.9.11,<0.10.0"]
+build-backend = "uv_build"
+
+# El paquete de distribución se llama "records-aemet", pero el módulo importable
+# sigue siendo `extremos` (src/extremos/) y los comandos CLI mantienen el prefijo
+# `extremos-` para no romper el cron de la Pi. Sin esto, uv_build buscaría
+# `src/records_aemet/` por defecto y el build fallaría.
+[tool.uv.build-backend]
+module-name = "extremos"

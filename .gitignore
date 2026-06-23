@@ -1,0 +1,24 @@
+# Datos locales y generados (DuckDB de trabajo + JSONs)
+data/
+outputs/
+
+# uv / Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+
+# Entornos (secretos)
+.env
+.env.local
+
+# Logs
+*.log
+
+# SO / IDE
+.DS_Store
+.vscode/
+.idea/
+
+.claude/
