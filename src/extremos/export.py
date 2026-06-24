@@ -9,11 +9,18 @@ Convenciones:
   - Los contadores (`totales`) cuentan solo récords realmente batidos
     (`valor_anterior IS NOT NULL`). El primer valor de cada serie define el récord
     inicial pero no es un "evento de récord".
+  - `eventos`: escalera completa de récords (todos los peldaños). Los que no se
+    cuentan como batidos —el primero de la serie y los del warm-up— van con
+    `valorAnterior: null` y `inicial: true`. Garantiza `vigentes ⊆ eventos`: el
+    récord vigente siempre tiene su punto en el timeline (gráfico nunca vacío).
   - `vigentes.absolutoMax`: TMAX más alta jamás registrada (día más caluroso).
   - `vigentes.absolutoMin`: TMIN más alta jamás registrada (noche más cálida).
   - `mensuales`: 12 entradas (una por mes) con max/min vigentes y su fecha. El
     récord mensual que coincide con el absoluto vigente lleva `abs: true`.
   - `ultimoRecord` en el detalle: evento de récord más reciente, cualquier tipo.
+  - `sinDatos`: tramos de cobertura sin ningún dato (huecos interiores), como
+    intervalos `{desde, hasta, dias}`, para pintar un overlay sobre los gráficos.
+    Solo huecos de ≥ `HUECO_MIN_DIAS` días (ver config).
 """
 from __future__ import annotations
 
@@ -29,7 +36,7 @@ from typing import Any
 import duckdb
 
 from extremos import dataset_card
-from extremos.config import OUTPUTS_DIR
+from extremos.config import HUECO_MIN_DIAS, OUTPUTS_DIR
 from extremos.db import connect
 
 log = logging.getLogger("extremos.export")
@@ -253,15 +260,32 @@ def _ultimo_record_for(con: duckdb.DuckDBPyConnection, indicativo: str) -> dict[
 
 
 def _eventos_for(con: duckdb.DuckDBPyConnection, indicativo: str) -> list[dict[str, Any]]:
-    """Timeline desc de récords realmente batidos."""
+    """Timeline desc de la *escalera* completa de récords.
+
+    Incluye todos los eventos que fijaron un récord (cada fila de record_events ya
+    es un peldaño: solo se generan cuando el valor mejora el récord vigente),
+    estén o no contabilizados como "batidos".
+
+    Un evento cuenta como récord batido —y lleva ``valorAnterior`` no nulo— solo si
+    superó al vigente con la serie ya madura. Los demás (el primero de cada serie y
+    los fijados durante el warm-up) salen con ``valorAnterior: null`` y la marca
+    ``inicial: true``: establecen el récord —por eso aparecen aquí y casan con
+    ``vigentes``— pero no se contabilizan como batidos.
+
+    De este modo se mantiene el invariante ``vigentes ⊆ eventos`` (el gráfico de
+    evolución dibuja la escalera real y nunca queda vacío cuando hay récord
+    vigente), mientras los contadores de récords batidos siguen filtrando
+    ``valorAnterior != null`` por su cuenta (``totales``, ``ultimoRecord``…).
+    """
     rows = con.execute("""
         SELECT fecha, tipo, mes, valor, valor_anterior, dias_desde_anterior, provisional
         FROM record_events
-        WHERE indicativo=? AND valor_anterior IS NOT NULL
+        WHERE indicativo=?
         ORDER BY fecha DESC, tipo
     """, [indicativo]).fetchall()
-    return [
-        {
+    eventos: list[dict[str, Any]] = []
+    for fecha, tipo, mes, valor, valor_anterior, dias, provisional in rows:
+        ev: dict[str, Any] = {
             "fecha": fecha.isoformat(),
             "tipo": tipo,
             "mes": mes,
@@ -270,7 +294,47 @@ def _eventos_for(con: duckdb.DuckDBPyConnection, indicativo: str) -> list[dict[s
             "diasDesdeAnterior": dias,
             "provisional": bool(provisional),
         }
-        for (fecha, tipo, mes, valor, valor_anterior, dias, provisional) in rows
+        # `inicial`: el evento establece el récord pero no se cuenta como batido
+        # (primer evento de la serie o fijado durante el warm-up).
+        if valor_anterior is None:
+            ev["inicial"] = True
+        eventos.append(ev)
+    return eventos
+
+
+def _huecos_for(con: duckdb.DuckDBPyConnection, indicativo: str) -> list[dict[str, Any]]:
+    """Huecos de cobertura (tramos sin ningún dato) para pintar un overlay.
+
+    Cada hueco es un intervalo ``{desde, hasta, dias}`` de días consecutivos sin
+    observación entre dos días que sí la tienen (huecos interiores; no hay tramos
+    al principio ni al final por definición). ``dias`` = número de días sin dato.
+
+    Un día "tiene dato" si registró TMAX o TMIN (provisional incluido: en el gráfico
+    se dibuja igual, así que no es un hueco). Solo se exportan huecos de
+    ``HUECO_MIN_DIAS`` días o más: en un eje de años, los de 1-2 días son invisibles
+    y solo añaden ruido y peso al JSON.
+    """
+    rows = con.execute("""
+        WITH dd AS (
+            SELECT DISTINCT fecha
+            FROM observations
+            WHERE indicativo = ? AND (tmax IS NOT NULL OR tmin IS NOT NULL)
+        ),
+        gaps AS (
+            SELECT
+                LAG(fecha) OVER (ORDER BY fecha) + 1 AS desde,
+                fecha - 1                           AS hasta,
+                (fecha - LAG(fecha) OVER (ORDER BY fecha))::INTEGER - 1 AS dias
+            FROM dd
+        )
+        SELECT desde, hasta, dias
+        FROM gaps
+        WHERE dias >= ?
+        ORDER BY desde
+    """, [indicativo, HUECO_MIN_DIAS]).fetchall()
+    return [
+        {"desde": desde.isoformat(), "hasta": hasta.isoformat(), "dias": int(dias)}
+        for (desde, hasta, dias) in rows
     ]
 
 
@@ -318,6 +382,7 @@ def main(argv: list[str] | None = None) -> None:
             "ultimoRecord": _ultimo_record_for(con, indicativo),
             "mensuales": _mensuales_for(con, indicativo),
             "eventos": _eventos_for(con, indicativo),
+            "sinDatos": _huecos_for(con, indicativo),
         }
         _write_json(detail_dir / f"{indicativo}.json", payload)
     log.info("Escritos %d JSONs de detalle en %s/", len(summary), detail_dir)

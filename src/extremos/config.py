@@ -49,6 +49,12 @@ RECORD_WARMUP_DAYS = int(os.environ.get("EXTREMOS_RECORD_WARMUP_DAYS", "365"))
 # fuera de temporada que ya no representa la envolvente real.
 RECORD_GAP_RESET_DAYS = int(os.environ.get("EXTREMOS_RECORD_GAP_RESET_DAYS", "180"))
 
+# Tamaño mínimo (en días) de un hueco de cobertura para exportarlo en el bloque
+# `sinDatos` de cada estación, que la app pinta como overlay sobre los gráficos.
+# Los huecos más cortos (la mitad son de 1 solo día) son invisibles en un eje de
+# años y solo añaden ruido y peso al JSON, así que no se exportan.
+HUECO_MIN_DIAS = int(os.environ.get("EXTREMOS_HUECO_MIN_DIAS", "7"))
+
 # AEMET publica las climatologías diarias con ~4 días de retraso (su FAQ oficial,
 # v1.4 jul-2025, §4.2: "aproximadamente 4 días"). Usamos 3, por debajo de ese
 # retraso, para priorizar la frescura de los datos: pedimos el día más reciente
