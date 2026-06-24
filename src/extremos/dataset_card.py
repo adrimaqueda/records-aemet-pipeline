@@ -6,6 +6,7 @@ del dataset en cada pasada y nunca queda desfasada. Los huecos `@@...@@` se
 rellenan con datos reales de la DuckDB; el resto (esquemas, ejemplos, semántica)
 es estático.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -35,6 +36,8 @@ size_categories:
 ---
 
 # Récords de temperatura por estación (AEMET)
+
+Datos usados en https://records-temperatura.adrimaqueda.com/
 
 JSONs ligeros con los **récords de temperatura** de las estaciones de AEMET,
 derivados de las observaciones climatológicas diarias. Es la capa de datos que
