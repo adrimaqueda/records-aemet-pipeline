@@ -196,10 +196,10 @@ orden de la tupla lo define `rowFields`.
 ```json
 {
   "generadoEn": "2026-06-18T21:02:35+02:00",
-  "anioMin": 1975, "anioMax": 2026,
+  "anioMin": 1920, "anioMax": 2026,
   "rowFields": ["absolutoMax","absolutoMin","mensualMax","mensualMin","estacionesConDatos","estacionesBatieronMax","estacionesBatieronMin"],
-  "anios": [1975, 1976, 1977, "…"],
-  "ejeMensual": [[1975,1],[1975,2], "…"],
+  "anios": [1920, 1921, 1922, "…"],
+  "ejeMensual": [[1920,1],[1920,2], "…"],
   "grupos": [
     { "id": "total", "nombre": "Todas las estaciones", "nEstaciones": 944, "provinciasAemet": [] },
     { "id": "a-coruna", "nombre": "A Coruña", "nEstaciones": 19, "provinciasAemet": ["A CORUÑA"] }

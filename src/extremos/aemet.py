@@ -197,6 +197,23 @@ class AemetClient:
         )
         return self.get(path)
 
+    def station_daily(self, idema: str, ini: str, fin: str) -> list[dict[str, Any]]:
+        """Diarios de UNA estación entre dos fechas (max 6 meses por petición).
+
+        A diferencia de `daily_observations` (todasestaciones, que en la práctica
+        sólo cubre 1975→hoy), este endpoint por estación devuelve el histórico
+        completo de la serie, que para algunas estaciones se remonta a ~1920. Es
+        la única vía para rellenar los años anteriores a 1975. `ini`/`fin` en
+        formato YYYY-MM-DD.
+        """
+        ini_str = f"{ini}T00:00:00UTC"
+        fin_str = f"{fin}T23:59:59UTC"
+        path = (
+            f"/api/valores/climatologicos/diarios/datos"
+            f"/fechaini/{ini_str}/fechafin/{fin_str}/estacion/{idema}"
+        )
+        return self.get(path)
+
     def inventory_stations(self) -> list[dict[str, Any]]:
         """Inventario actualizado de todas las estaciones."""
         return self.get(

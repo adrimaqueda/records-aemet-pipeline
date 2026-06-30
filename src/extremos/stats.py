@@ -31,14 +31,17 @@ def _sort_key(s: str) -> str:
 
 import duckdb
 
-from extremos.config import OUTPUTS_DIR
+from extremos.config import MIN_HISTORICO_YEAR, OUTPUTS_DIR
 from extremos.db import connect
 from extremos.provincias import PROVINCIA_NAMES, PROVINCIA_NORM, rows_for_duckdb
 
 log = logging.getLogger("extremos.stats")
 
-# Solo nos interesan datos a partir de este año (criterio del proyecto).
-MIN_YEAR = 1975
+# Suelo de los agregados de /datos. Coincide con el del backfill histórico
+# per-estación (config.MIN_HISTORICO_YEAR): una vez rellenado el histórico previo
+# a 1975, los agregados nacionales/provinciales lo incluyen. El eje de años se
+# deriva de los datos, así que basta con bajar este suelo para que aparezcan.
+MIN_YEAR = MIN_HISTORICO_YEAR
 
 
 def _create_lookup(con: duckdb.DuckDBPyConnection) -> None:

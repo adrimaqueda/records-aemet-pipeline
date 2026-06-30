@@ -17,6 +17,11 @@ Genera dos tablas (drop+create cada vez, es barato):
       se fijó antes de la madurez y nunca se superó, sigue siendo el récord en
       curso. (Generaliza la antigua regla del "primer año natural", que solo
       cubría el primer año de calendario; ver config.RECORD_WARMUP_DAYS.)
+      Los eventos no maduros (inicial) de un MISMO segmento se colapsan en uno
+      solo —el de mayor valor, el máximo del warm-up—, así que el récord inicial
+      es ese máximo y no toda la escalera que sube por el avance estacional (ver
+      CTE `collapsed`). Cada segmento (serie inicial o reanudación tras un hueco)
+      deja como mucho un evento inicial por categoría/mes.
     - dias_desde_anterior: días entre este evento y el anterior de la misma categoría.
 
   station_coverage(indicativo, datos_desde, datos_hasta, dias_con_datos, dias_ultimo_anio, activa)
@@ -95,6 +100,7 @@ base AS (
     SELECT
         o.indicativo,
         o.fecha,
+        sg.seg_id,
         EXTRACT(MONTH FROM o.fecha)::INTEGER AS mes,
         o.tmax,
         o.tmin,
@@ -106,7 +112,7 @@ base AS (
     JOIN segmentos sg USING (indicativo, fecha)
 ),
 abs_max_e AS (
-    SELECT indicativo, fecha, maduro, tmax AS valor,
+    SELECT indicativo, fecha, seg_id, maduro, tmax AS valor,
            MAX(tmax) OVER (
                PARTITION BY indicativo ORDER BY fecha
                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
@@ -116,7 +122,7 @@ abs_max_e AS (
 ),
 abs_min_e AS (
     -- TMIN más alta jamás registrada (noche más cálida).
-    SELECT indicativo, fecha, maduro, tmin AS valor,
+    SELECT indicativo, fecha, seg_id, maduro, tmin AS valor,
            MAX(tmin) OVER (
                PARTITION BY indicativo ORDER BY fecha
                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
@@ -125,7 +131,7 @@ abs_min_e AS (
     QUALIFY prev IS NULL OR tmin > prev
 ),
 mes_max_e AS (
-    SELECT indicativo, fecha, mes, maduro, tmax AS valor,
+    SELECT indicativo, fecha, seg_id, mes, maduro, tmax AS valor,
            MAX(tmax) OVER (
                PARTITION BY indicativo, mes ORDER BY fecha
                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
@@ -135,7 +141,7 @@ mes_max_e AS (
 ),
 mes_min_e AS (
     -- TMIN más alta de cada mes calendario.
-    SELECT indicativo, fecha, mes, maduro, tmin AS valor,
+    SELECT indicativo, fecha, seg_id, mes, maduro, tmin AS valor,
            MAX(tmin) OVER (
                PARTITION BY indicativo, mes ORDER BY fecha
                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
@@ -146,34 +152,60 @@ mes_min_e AS (
 unioned AS (
     -- Mientras la serie no es madura anulamos valor_anterior: esos eventos no
     -- cuentan como récords batidos (el valor sí queda como vigente).
-    SELECT indicativo, 'absoluto-max' AS tipo, fecha, NULL::INTEGER AS mes, valor,
+    SELECT indicativo, 'absoluto-max' AS tipo, fecha, seg_id, NULL::INTEGER AS mes, valor,
            CASE WHEN maduro THEN prev END AS valor_anterior
     FROM abs_max_e
     UNION ALL
-    SELECT indicativo, 'absoluto-min', fecha, NULL::INTEGER, valor,
+    SELECT indicativo, 'absoluto-min', fecha, seg_id, NULL::INTEGER, valor,
            CASE WHEN maduro THEN prev END FROM abs_min_e
     UNION ALL
-    SELECT indicativo, 'mensual-max', fecha, mes, valor,
+    SELECT indicativo, 'mensual-max', fecha, seg_id, mes, valor,
            CASE WHEN maduro THEN prev END FROM mes_max_e
     UNION ALL
-    SELECT indicativo, 'mensual-min', fecha, mes, valor,
+    SELECT indicativo, 'mensual-min', fecha, seg_id, mes, valor,
            CASE WHEN maduro THEN prev END FROM mes_min_e
+),
+collapsed AS (
+    -- Los récords batidos (maduros, valor_anterior no nulo) pasan todos: cada uno
+    -- es un peldaño real de la escalera.
+    SELECT indicativo, tipo, fecha, mes, valor, valor_anterior
+    FROM unioned
+    WHERE valor_anterior IS NOT NULL
+    UNION ALL
+    -- Los eventos `inicial` (warm-up) de un mismo segmento se colapsan en UNO
+    -- solo: el de mayor valor, que es el máximo establecido durante ese warm-up
+    -- (el primer año de la serie, o la reanudación tras una interrupción). Así el
+    -- récord inicial es ese máximo y no toda la escalera de "récords" que sube sin
+    -- más por el avance estacional. El máximo es el último peldaño (la envolvente
+    -- crece de forma monótona), así que sigue siendo el evento más reciente del
+    -- segmento → `vigentes`/`mensuales` (que toman el último por fecha) no cambian.
+    SELECT indicativo, tipo, fecha, mes, valor, valor_anterior
+    FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (
+                   PARTITION BY indicativo, tipo, COALESCE(mes, 0), seg_id
+                   ORDER BY valor DESC, fecha DESC
+               ) AS rn
+        FROM unioned
+        WHERE valor_anterior IS NULL
+    )
+    WHERE rn = 1
 )
 SELECT
-    u.indicativo,
-    u.tipo,
-    u.fecha,
-    u.mes,
-    u.valor,
-    u.valor_anterior,
+    c.indicativo,
+    c.tipo,
+    c.fecha,
+    c.mes,
+    c.valor,
+    c.valor_anterior,
     COALESCE(o.provisional, FALSE) AS provisional,
-    (u.fecha - LAG(u.fecha) OVER (
-        PARTITION BY u.indicativo, u.tipo, u.mes ORDER BY u.fecha
+    (c.fecha - LAG(c.fecha) OVER (
+        PARTITION BY c.indicativo, c.tipo, c.mes ORDER BY c.fecha
     ))::INTEGER AS dias_desde_anterior
-FROM unioned u
+FROM collapsed c
 LEFT JOIN observations o
-    ON o.indicativo = u.indicativo AND o.fecha = u.fecha
-ORDER BY u.indicativo, u.tipo, COALESCE(u.mes, 0), u.fecha;
+    ON o.indicativo = c.indicativo AND o.fecha = c.fecha
+ORDER BY c.indicativo, c.tipo, COALESCE(c.mes, 0), c.fecha;
 """
 
 COVERAGE_SQL = f"""

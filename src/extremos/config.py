@@ -27,9 +27,24 @@ AEMET_API_KEY = os.environ.get("AEMET_API_KEY", "")
 AEMET_BASE_URL = "https://opendata.aemet.es/opendata"
 AEMET_RATE_LIMIT_PER_MIN = 45
 
-# Año mínimo a considerar en el backfill. Antes de 1975 la cobertura es anecdótica
-# (apenas 16 estaciones, datania solo tiene 1920-1922).
+# Año mínimo a considerar en el backfill DESDE DATANIA. datania sólo mirroriza de
+# forma continua a partir de 1975 (antes apenas tiene 1920-1922 sueltos), así que
+# este es el suelo del backfill bulk. El histórico previo a 1975 se rellena, por
+# estación, con `extremos-backfill-historico` (ver MIN_HISTORICO_YEAR).
 MIN_BACKFILL_YEAR = int(os.environ.get("EXTREMOS_MIN_YEAR", "1975"))
+
+# Suelo del backfill histórico per-estación (`backfill_historico.py`) y de los
+# agregados de la página /datos (`stats.py`). El endpoint por estación de AEMET
+# sirve diarios hasta ~1920 para las series más largas; antes no hay datos. Es
+# también el año desde el que los agregados nacionales/provinciales empiezan a
+# contar, una vez rellenado ese histórico.
+MIN_HISTORICO_YEAR = int(os.environ.get("EXTREMOS_MIN_HISTORICO_YEAR", "1920"))
+
+# Nº de ventanas semestrales consecutivas sin datos, yendo hacia atrás, tras las
+# que el backfill histórico da por agotada la serie de una estación y deja de
+# pedir años más antiguos (la estación aún no existía). 4 = 2 años, holgado para
+# no cortar una serie con un hueco temprano de un año.
+HISTORICO_EMPTY_STOP = int(os.environ.get("EXTREMOS_HISTORICO_EMPTY_STOP", "4"))
 
 # Estación activa = al menos N días reportados en los últimos 12 meses.
 ACTIVE_STATION_MIN_DAYS = int(os.environ.get("EXTREMOS_ACTIVE_MIN_DAYS", "180"))

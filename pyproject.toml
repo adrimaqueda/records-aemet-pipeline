@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 extremos-backfill = "extremos.backfill:main"
+extremos-backfill-historico = "extremos.backfill_historico:main"
 extremos-fetch    = "extremos.fetch:main"
 extremos-provisional = "extremos.provisional:main"
 extremos-records  = "extremos.records:main"
