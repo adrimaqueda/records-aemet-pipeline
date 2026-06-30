@@ -4,6 +4,8 @@ Pipeline de datos de AEMET: descarga observaciones diarias, calcula los récords
 de temperatura por estación y publica en HuggingFace los JSONs que consume la
 app web. Es una **elaboración propia**, no un producto oficial de AEMET.
 
+Los datasets resultantes son los que se usan en https://records-temperatura.adrimaqueda.com/
+
 Flujo de datos:
 
 ```
