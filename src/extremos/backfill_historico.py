@@ -59,7 +59,10 @@ def _half_year_windows(from_year: int, to_year: int) -> list[tuple[date, date]]:
 
 
 def _target_stations(
-    con: duckdb.DuckDBPyConnection, *, include_complete: bool = False
+    con: duckdb.DuckDBPyConnection,
+    *,
+    include_complete: bool = False,
+    include_all: bool = False,
 ) -> list[tuple[str, date]]:
     """Estaciones pendientes de histórico, con (indicativo, primer_día_en_db).
 
@@ -70,8 +73,20 @@ def _target_stations(
     Ese segundo caso reanuda solo los orphans (estaciones a medias) en la próxima
     pasada. Con `include_complete` se ignora la marca de completa (para --force).
     Sólo definitivos (los provisionales son de hoy).
+
+    Con `include_all` (--all) se sondea CUALQUIER estación con datos aún no
+    completada, arranque cuando arranque su serie. Cubre el caso que el filtro
+    de 1975 no ve: una estación que operó antes de 1975, cerró y reabrió después
+    — su serie en la DB empieza tras 1975 (el bulk `todasestaciones` no llega más
+    atrás) pero el endpoint por estación sí tiene su histórico antiguo. Para las
+    que no tienen nada cuesta ~EMPTY_STOP peticiones por estación, y quedan
+    marcadas completas para no re-sondearlas.
     """
     complete_filter = "" if include_complete else "NOT COALESCE(hp.complete, FALSE) AND"
+    target_filter = (
+        "TRUE" if include_all
+        else "(EXTRACT(year FROM s.desde) = 1975 OR hp.indicativo IS NOT NULL)"
+    )
     return con.execute(
         f"""
         WITH starts AS (
@@ -83,8 +98,7 @@ def _target_stations(
         SELECT s.indicativo, s.desde
         FROM starts s
         LEFT JOIN historico_progress hp USING (indicativo)
-        WHERE {complete_filter}
-              (EXTRACT(year FROM s.desde) = 1975 OR hp.indicativo IS NOT NULL)
+        WHERE {complete_filter} {target_filter}
         ORDER BY s.indicativo
         """
     ).fetchall()
@@ -161,6 +175,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--station", action="append", dest="stations",
                    help="Procesa sólo este indicativo (repetible). Ignora el "
                         "filtro de 'arranca en 1975'.")
+    p.add_argument("--all", action="store_true", dest="all_stations",
+                   help="Sondea TODAS las estaciones con datos aún no completadas, "
+                        "no solo las que arrancan en 1975 (caza series que operaron "
+                        "antes de 1975, cerraron y reabrieron después)")
     p.add_argument("--force", action="store_true",
                    help="Reprocesa estaciones ya marcadas como completas")
     args = p.parse_args(argv)
@@ -169,15 +187,24 @@ def main(argv: list[str] | None = None) -> None:
     con.execute(PROGRESS_SQL)
 
     if args.stations:
-        pending = con.execute(
+        rows = con.execute(
             "SELECT indicativo, MIN(fecha) FROM observations "
             "WHERE indicativo IN ({}) AND NOT COALESCE(provisional, FALSE) "
-            "GROUP BY indicativo ORDER BY indicativo".format(
-                ",".join("?" * len(args.stations))),
+            "GROUP BY indicativo".format(",".join("?" * len(args.stations))),
             args.stations,
         ).fetchall()
+        desde_db = dict(rows)
+        # Estación sin NINGUNA observación en la DB (p. ej. cerró antes de 1975 y
+        # nunca aparece en el bulk 1975→hoy): se sondea desde hoy hacia atrás.
+        # Ojo: su serie puede acabar décadas atrás, así que hace falta un
+        # --empty-stop grande para llegar hasta ella (p. ej. 130 ≈ 65 años).
+        pending = sorted(
+            (ind, desde_db.get(ind) or date.today()) for ind in set(args.stations)
+        )
     else:
-        pending = _target_stations(con, include_complete=args.force)
+        pending = _target_stations(
+            con, include_complete=args.force, include_all=args.all_stations
+        )
     if args.limit:
         pending = pending[: args.limit]
 
