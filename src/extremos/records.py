@@ -48,6 +48,7 @@ from extremos.config import (
     RECORD_WARMUP_DAYS,
 )
 from extremos.db import connect
+from extremos.logconf import setup_logging
 
 log = logging.getLogger("extremos.records")
 
@@ -246,7 +247,7 @@ def compute(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging()
     argparse.ArgumentParser(description="Recalcula tablas de récords").parse_args(argv)
 
     con = connect()

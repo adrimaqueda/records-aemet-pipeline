@@ -31,6 +31,7 @@ import polars as pl
 from extremos.aemet import AemetClient
 from extremos.config import PROVISIONAL_MAX_AGE_DAYS
 from extremos.db import connect
+from extremos.logconf import setup_logging
 from extremos.parsing import normalize_hourly
 
 log = logging.getLogger("extremos.provisional")
@@ -178,9 +179,7 @@ def run(con: duckdb.DuckDBPyConnection, client: AemetClient) -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    for noisy in ("httpx", "httpcore", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging()
     argparse.ArgumentParser(
         description="Reconstruye récords provisionales desde el horario en tiempo real"
     ).parse_args(argv)

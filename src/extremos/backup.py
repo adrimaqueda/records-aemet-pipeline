@@ -28,6 +28,7 @@ from huggingface_hub import HfApi, snapshot_download
 from extremos.backfill import PROGRESS_SQL
 from extremos.config import DB_PATH, HF_DB_REPO
 from extremos.db import connect
+from extremos.logconf import setup_logging
 
 log = logging.getLogger("extremos.backup")
 
@@ -92,9 +93,7 @@ def restore(repo: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    for noisy in ("httpx", "httpcore", "huggingface_hub", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging()
     p = argparse.ArgumentParser(description="Backup/restore de la DuckDB en HF privado")
     p.add_argument("--restore", action="store_true",
                    help="Restaura la DB desde el backup en lugar de subirla")

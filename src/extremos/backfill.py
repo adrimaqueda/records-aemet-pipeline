@@ -15,11 +15,12 @@ import tempfile
 from pathlib import Path
 
 import duckdb
-import polars as pl
 from huggingface_hub import HfApi, snapshot_download
 
 from extremos.config import HF_SOURCE_REPO, MIN_BACKFILL_YEAR
 from extremos.db import connect
+from extremos.ingest import insert_observations, insert_stations
+from extremos.logconf import setup_logging
 from extremos.parsing import normalize_observation, normalize_station
 
 log = logging.getLogger("extremos.backfill")
@@ -36,15 +37,6 @@ CREATE TABLE IF NOT EXISTS backfill_progress (
     PRIMARY KEY (year, month)
 );
 """
-
-OBS_COLS = (
-    "indicativo", "fecha", "tmed", "tmin", "tmax", "horatmin", "horatmax",
-    "prec", "sol", "hr_media", "vel_media", "pres_max", "pres_min",
-)
-
-STATION_COLS = (
-    "indicativo", "nombre", "provincia", "altitud", "latitud", "longitud", "indsinop",
-)
 
 
 def _list_subdirs(api: HfApi, path: str) -> list[str]:
@@ -77,15 +69,6 @@ def download(pattern: str) -> Path:
     return tmp
 
 
-def _insert_df(con: duckdb.DuckDBPyConnection, table: str, df: pl.DataFrame) -> None:
-    """INSERT OR REPLACE de un DataFrame en una tabla con PK."""
-    con.register("incoming", df)
-    try:
-        con.execute(f"INSERT OR REPLACE INTO {table} BY NAME SELECT * FROM incoming")
-    finally:
-        con.unregister("incoming")
-
-
 def ingest_stations(con: duckdb.DuckDBPyConnection) -> int:
     log.info("Descargando metadatos de estaciones…")
     tmp = download(f"{STATIONS_BASE}/*.json")
@@ -96,15 +79,7 @@ def ingest_stations(con: duckdb.DuckDBPyConnection) -> int:
                 norm = normalize_station(json.load(f))
             if norm["indicativo"]:
                 rows.append(norm)
-        if not rows:
-            return 0
-        df = pl.DataFrame(rows, schema={
-            "indicativo": pl.Utf8, "nombre": pl.Utf8, "provincia": pl.Utf8,
-            "altitud": pl.Int64, "latitud": pl.Float64, "longitud": pl.Float64,
-            "indsinop": pl.Utf8,
-        })
-        _insert_df(con, "stations", df)
-        return len(rows)
+        return insert_stations(con, rows)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -121,31 +96,13 @@ def ingest_month(con: duckdb.DuckDBPyConnection, year: int, month: int) -> int:
                     norm = normalize_observation(raw)
                     if norm["indicativo"] and norm["fecha"]:
                         rows.append(norm)
-        if not rows:
-            return 0
-        df = pl.DataFrame(rows, schema={
-            "indicativo": pl.Utf8, "fecha": pl.Utf8,
-            "tmed": pl.Float64, "tmin": pl.Float64, "tmax": pl.Float64,
-            "horatmin": pl.Utf8, "horatmax": pl.Utf8,
-            "prec": pl.Float64, "sol": pl.Float64,
-            "hr_media": pl.Float64, "vel_media": pl.Float64,
-            "pres_max": pl.Float64, "pres_min": pl.Float64,
-        }).with_columns(
-            pl.col("fecha").str.to_date(),
-            # Histórico definitivo: pisa también el flag por si solapa un día
-            # que estuviera provisional (ver nota en fetch._insert_observations).
-            pl.lit(False).alias("provisional"),
-        )
-        _insert_df(con, "observations", df)
-        return len(rows)
+        return insert_observations(con, rows)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    for noisy in ("httpx", "httpcore", "huggingface_hub", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging()
     p = argparse.ArgumentParser(description="Backfill AEMET desde HF datania/aemet")
     p.add_argument("--from-year", type=int, default=MIN_BACKFILL_YEAR,
                    help=f"Año mínimo a procesar (default: {MIN_BACKFILL_YEAR}, "

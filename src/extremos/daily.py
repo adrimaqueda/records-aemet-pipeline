@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import logging
-import sys
+
+from extremos.logconf import setup_logging
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    for noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging()
 
     from extremos import export, fetch, provisional, publish, rankings, records, stats
 

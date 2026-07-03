@@ -4,30 +4,31 @@ Lógica:
 1. Calcula la ventana [start, end]:
    - start = max(fecha) en observations + 1d  (o un default si la tabla está vacía)
    - end   = hoy - INGEST_LAG_DAYS  (AEMET publica con retraso)
-2. Trocea la ventana en chunks de máx 31 días (límite de la API para todasestaciones).
+2. Trocea la ventana en chunks de máx CHUNK_DAYS días (límite de la API para
+   todasestaciones).
 3. Para cada chunk: AEMET → normalize → INSERT OR REPLACE en observations.
 4. Opcionalmente refresca la tabla stations con el inventario actual.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from datetime import date, timedelta
 
 import duckdb
-import polars as pl
 
 from extremos.aemet import AemetClient, AemetError, AemetNoData
 from extremos.config import INGEST_LAG_DAYS
 from extremos.db import connect
+from extremos.ingest import insert_observations, insert_stations
+from extremos.logconf import setup_logging
 from extremos.parsing import normalize_observation, normalize_station
 
 log = logging.getLogger("extremos.fetch")
 
 DEFAULT_BACKSTOP = date(2024, 1, 1)  # solo se usa si la DB está vacía
-CHUNK_DAYS = 15  # límite real de la API AEMET para todasestaciones
+CHUNK_DAYS = 15  # límite real de la API AEMET para todasestaciones (documenta 31)
 
 
 def _last_obs_date(con: duckdb.DuckDBPyConnection) -> date | None:
@@ -50,48 +51,11 @@ def _chunk_ranges(start: date, end: date, days: int = CHUNK_DAYS) -> list[tuple[
     return chunks
 
 
-def _insert_observations(con: duckdb.DuckDBPyConnection, rows: list[dict]) -> int:
-    if not rows:
-        return 0
-    df = pl.DataFrame(rows, schema={
-        "indicativo": pl.Utf8, "fecha": pl.Utf8,
-        "tmed": pl.Float64, "tmin": pl.Float64, "tmax": pl.Float64,
-        "horatmin": pl.Utf8, "horatmax": pl.Utf8,
-        "prec": pl.Float64, "sol": pl.Float64,
-        "hr_media": pl.Float64, "vel_media": pl.Float64,
-        "pres_max": pl.Float64, "pres_min": pl.Float64,
-    }).with_columns(
-        pl.col("fecha").str.to_date(),
-        # Dato definitivo: marca provisional=FALSE explícitamente. Imprescindible
-        # porque INSERT OR REPLACE BY NAME sólo actualiza las columnas presentes,
-        # así que un día que antes era provisional debe pisar también ese flag.
-        pl.lit(False).alias("provisional"),
-    )
-    con.register("incoming", df)
-    try:
-        con.execute("INSERT OR REPLACE INTO observations BY NAME SELECT * FROM incoming")
-    finally:
-        con.unregister("incoming")
-    return len(rows)
-
-
 def _refresh_stations(con: duckdb.DuckDBPyConnection, client: AemetClient) -> int:
     log.info("Refrescando inventario de estaciones…")
     raw = client.inventory_stations()
     rows = [normalize_station(r) for r in raw if r.get("indicativo")]
-    if not rows:
-        return 0
-    df = pl.DataFrame(rows, schema={
-        "indicativo": pl.Utf8, "nombre": pl.Utf8, "provincia": pl.Utf8,
-        "altitud": pl.Int64, "latitud": pl.Float64, "longitud": pl.Float64,
-        "indsinop": pl.Utf8,
-    })
-    con.register("incoming_st", df)
-    try:
-        con.execute("INSERT OR REPLACE INTO stations BY NAME SELECT * FROM incoming_st")
-    finally:
-        con.unregister("incoming_st")
-    return len(rows)
+    return insert_stations(con, rows)
 
 
 def fetch_range(con: duckdb.DuckDBPyConnection, client: AemetClient,
@@ -116,21 +80,18 @@ def fetch_range(con: duckdb.DuckDBPyConnection, client: AemetClient,
         except Exception:  # noqa: BLE001
             log.exception("Fallo inesperado en chunk %s..%s, sigo con el siguiente", chunk_ini, chunk_fin)
             continue
-        norm = []
-        for r in raw:
-            n = normalize_observation(r)
-            if n["indicativo"] and n["fecha"]:
-                norm.append(n)
-        n = _insert_observations(con, norm)
+        norm = [
+            n for r in raw
+            if (n := normalize_observation(r))["indicativo"] and n["fecha"]
+        ]
+        n = insert_observations(con, norm)
         total += n
         log.info("  ✓ %d observaciones", n)
     return total
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    for noisy in ("httpx", "httpcore", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging()
 
     p = argparse.ArgumentParser(description="Incremental fetch desde la API de AEMET")
     p.add_argument("--from", dest="from_date", type=date.fromisoformat,

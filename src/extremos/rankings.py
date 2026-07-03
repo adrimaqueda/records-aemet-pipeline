@@ -38,6 +38,7 @@ import duckdb
 
 from extremos.config import OUTPUTS_DIR
 from extremos.db import connect
+from extremos.logconf import setup_logging
 
 log = logging.getLogger("extremos.rankings")
 
@@ -305,7 +306,7 @@ def build(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging()
     argparse.ArgumentParser(description="Genera rankings.json").parse_args(argv)
 
     con = connect()

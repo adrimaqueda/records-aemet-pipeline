@@ -16,14 +16,13 @@ import sys
 from huggingface_hub import HfApi
 
 from extremos.config import HF_TARGET_REPO, OUTPUTS_DIR
+from extremos.logconf import setup_logging
 
 log = logging.getLogger("extremos.publish")
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    for noisy in ("httpx", "httpcore", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging()
     # `upload_folder` avisa (a nivel WARNING si hay >200 ficheros) de que subimos
     # una "carpeta grande" y sugiere `upload_large_folder`. Aquí es un falso
     # positivo: son ~870 JSONs pero solo 29 MB, el commit único va sobrado y

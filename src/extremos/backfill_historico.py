@@ -28,7 +28,8 @@ import duckdb
 from extremos.aemet import AemetClient, AemetError, AemetNoData
 from extremos.config import HISTORICO_EMPTY_STOP, MIN_HISTORICO_YEAR
 from extremos.db import connect
-from extremos.fetch import _insert_observations
+from extremos.ingest import insert_observations
+from extremos.logconf import setup_logging
 from extremos.parsing import normalize_observation
 
 log = logging.getLogger("extremos.backfill_historico")
@@ -140,16 +141,13 @@ def backfill_station(
                 break
             continue
         consecutive_empty = 0
-        total += _insert_observations(con, norm)
+        total += insert_observations(con, norm)
         earliest = win_ini
     return total, earliest
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    for noisy in ("httpx", "httpcore", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-
+    setup_logging()
     p = argparse.ArgumentParser(
         description="Backfill histórico per-estación (años anteriores a 1975)"
     )

@@ -38,6 +38,7 @@ import duckdb
 from extremos import dataset_card
 from extremos.config import HUECO_MIN_DIAS, OUTPUTS_DIR
 from extremos.db import connect
+from extremos.logconf import setup_logging
 
 log = logging.getLogger("extremos.export")
 
@@ -177,34 +178,40 @@ def _build_stations_summary(con: duckdb.DuckDBPyConnection) -> list[dict[str, An
     return out
 
 
-def _vigentes_for(con: duckdb.DuckDBPyConnection, indicativo: str) -> dict[str, Any]:
-    """Récords absolutos vigentes (último evento de cada categoría)."""
-    abs_max = con.execute("""
-        SELECT fecha, valor, provisional FROM record_events
-        WHERE indicativo=? AND tipo='absoluto-max'
-        ORDER BY fecha DESC LIMIT 1
-    """, [indicativo]).fetchone()
-    abs_min = con.execute("""
-        SELECT fecha, valor, provisional FROM record_events
-        WHERE indicativo=? AND tipo='absoluto-min'
-        ORDER BY fecha DESC LIMIT 1
-    """, [indicativo]).fetchone()
-    return {
-        "absolutoMax": _record(abs_max[0], abs_max[1], abs_max[2]) if abs_max else None,
-        "absolutoMin": _record(abs_min[0], abs_min[1], abs_min[2]) if abs_min else None,
-    }
+def _vigentes_for(
+    con: duckdb.DuckDBPyConnection, indicativo: str
+) -> tuple[dict[str, Any], dict[str, date]]:
+    """Récords absolutos vigentes (último evento de cada categoría).
+
+    Devuelve (payload para `vigentes`, fecha por familia 'max'/'min'). Las fechas
+    se reutilizan en `_mensuales_for` para marcar `abs: true` sin re-consultar.
+    """
+    vigentes: dict[str, Any] = {"absolutoMax": None, "absolutoMin": None}
+    fechas: dict[str, date] = {}
+    for tipo, key, fam in (("absoluto-max", "absolutoMax", "max"),
+                           ("absoluto-min", "absolutoMin", "min")):
+        row = con.execute("""
+            SELECT fecha, valor, provisional FROM record_events
+            WHERE indicativo=? AND tipo=?
+            ORDER BY fecha DESC LIMIT 1
+        """, [indicativo, tipo]).fetchone()
+        if row:
+            vigentes[key] = _record(row[0], row[1], row[2])
+            fechas[fam] = row[0]
+    return vigentes, fechas
 
 
-def _mensuales_for(con: duckdb.DuckDBPyConnection, indicativo: str) -> list[dict[str, Any]]:
+def _mensuales_for(con: duckdb.DuckDBPyConnection, indicativo: str,
+                   abs_fecha: dict[str, date]) -> list[dict[str, Any]]:
     """Récords mensuales vigentes: 12 entradas, cada una con max y min y sus fechas.
 
     "max" = TMAX más alta de ese mes calendario · "min" = TMIN más alta de ese mes.
 
     Cada récord mensual lleva `abs: true` cuando coincide con el récord ABSOLUTO
     vigente de su familia (el mes en que se fijó el máximo/mínimo histórico). Se
-    detecta por la fecha: el absoluto vigente cae en un día concreto, y el récord
-    mensual vigente de ese mes es ese mismo día. La clave se omite cuando es false
-    (igual que `provisional`).
+    detecta por la fecha (`abs_fecha`, de `_vigentes_for`): el absoluto vigente
+    cae en un día concreto, y el récord mensual vigente de ese mes es ese mismo
+    día. La clave se omite cuando es false (igual que `provisional`).
     """
     rows = con.execute("""
         WITH ranked AS (
@@ -217,17 +224,6 @@ def _mensuales_for(con: duckdb.DuckDBPyConnection, indicativo: str) -> list[dict
         SELECT mes, tipo, fecha, valor, provisional FROM ranked WHERE rn = 1
         ORDER BY mes, tipo
     """, [indicativo]).fetchall()
-
-    # Fecha del récord absoluto vigente de cada familia (max/min) para marcar qué
-    # récord mensual coincide con el absoluto.
-    abs_fecha: dict[str, date] = {}
-    for tipo, key in (("absoluto-max", "max"), ("absoluto-min", "min")):
-        r = con.execute("""
-            SELECT fecha FROM record_events
-            WHERE indicativo=? AND tipo=? ORDER BY fecha DESC LIMIT 1
-        """, [indicativo, tipo]).fetchone()
-        if r is not None:
-            abs_fecha[key] = r[0]
 
     by_mes: dict[int, dict[str, Any]] = {m: {"mes": m, "max": None, "min": None} for m in range(1, 13)}
     for mes, tipo, fecha, valor, provisional in rows:
@@ -347,7 +343,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging()
     p = argparse.ArgumentParser(description="Genera JSONs en outputs/")
     p.add_argument("--clean", action="store_true",
                    help="Borra outputs/ antes de regenerar")
@@ -367,6 +363,7 @@ def main(argv: list[str] | None = None) -> None:
     detail_dir.mkdir(parents=True, exist_ok=True)
     for st in summary:
         indicativo = st["indicativo"]
+        vigentes, abs_fechas = _vigentes_for(con, indicativo)
         payload = {
             "indicativo": indicativo,
             "nombre": st["nombre"],
@@ -378,9 +375,9 @@ def main(argv: list[str] | None = None) -> None:
             "datosHasta": st["datosHasta"],
             "diasConDatos": st["diasConDatos"],
             "totales": st["totales"],
-            "vigentes": _vigentes_for(con, indicativo),
+            "vigentes": vigentes,
             "ultimoRecord": _ultimo_record_for(con, indicativo),
-            "mensuales": _mensuales_for(con, indicativo),
+            "mensuales": _mensuales_for(con, indicativo, abs_fechas),
             "eventos": _eventos_for(con, indicativo),
             "sinDatos": _huecos_for(con, indicativo),
         }

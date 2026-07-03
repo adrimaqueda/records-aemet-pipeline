@@ -24,18 +24,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
-def _sort_key(s: str) -> str:
-    """Clave de ordenación insensible a tildes ("Ávila" entre "Asturias" y "Badajoz")."""
-    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
-
 import duckdb
 
 from extremos.config import MIN_HISTORICO_YEAR, OUTPUTS_DIR
 from extremos.db import connect
+from extremos.logconf import setup_logging
 from extremos.provincias import PROVINCIA_NAMES, PROVINCIA_NORM, rows_for_duckdb
 
 log = logging.getLogger("extremos.stats")
+
+
+def _sort_key(s: str) -> str:
+    """Clave de ordenación insensible a tildes ("Ávila" entre "Asturias" y "Badajoz")."""
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
 
 # Suelo de los agregados de /datos. Coincide con el del backfill histórico
 # per-estación (config.MIN_HISTORICO_YEAR): una vez rellenado el histórico previo
@@ -67,11 +68,13 @@ def _create_lookup(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def _records_query(group_by_month: bool) -> str:
-    """SQL agregando récords batidos por (año[, mes], ccaa) y por (año[, mes]) total.
+    """SQL agregando récords batidos por (año[, mes], provincia) y por (año[, mes]) total.
 
     Usa un CTE para nombrar las extracciones de fecha y luego GROUPING SETS
-    para obtener en la misma pasada las filas por CCAA y la fila "total"
-    (donde sg.ccaa = NULL).
+    para obtener en la misma pasada las filas por provincia y la fila "total".
+    `es_total` (GROUPING) distingue la fila de rollup de una provincia sin
+    mapear (ambas llevan grupo NULL); sin él, una provincia desconocida se
+    confundiría con el total.
     """
     month_select = ", base.mes" if group_by_month else ""
     month_group = ", base.mes" if group_by_month else ""
@@ -90,6 +93,7 @@ def _records_query(group_by_month: bool) -> str:
         SELECT
             base.anio{month_select},
             sg.grupo,
+            GROUPING(sg.grupo) AS es_total,
             COUNT(*) FILTER (WHERE base.tipo='absoluto-max') AS abs_max,
             COUNT(*) FILTER (WHERE base.tipo='absoluto-min') AS abs_min,
             COUNT(*) FILTER (WHERE base.tipo='mensual-max') AS mes_max,
@@ -127,6 +131,7 @@ def _observations_query(group_by_month: bool) -> str:
         SELECT
             base.anio{month_select},
             sg.grupo,
+            GROUPING(sg.grupo) AS es_total,
             COUNT(DISTINCT base.indicativo) AS n
         FROM base
         JOIN station_groups sg USING (indicativo)
@@ -135,13 +140,6 @@ def _observations_query(group_by_month: bool) -> str:
             (base.anio{month_group})
         )
     """
-
-
-def _group_key(grupo: str | None) -> str:
-    """sg.grupo es NULL en la fila agregada del GROUPING SETS = total.
-    Si una provincia AEMET no estuviera en el lookup (no debería ocurrir),
-    también caería aquí y se ignoraría con `if key not in group_ids`."""
-    return grupo if grupo else "total"
 
 
 # Formato tupla compacto. Cada fila lleva ROW_FIELDS en este orden. Los ejes
@@ -159,22 +157,30 @@ _IDX = {name: i for i, name in enumerate(ROW_FIELDS)}
 _EMPTY_ROW = [0] * len(ROW_FIELDS)
 
 
-def _build_anual(con: duckdb.DuckDBPyConnection, group_ids: list[str]) -> tuple[list[int], dict[str, list[list[int]]]]:
-    rec_rows = con.execute(_records_query(group_by_month=False)).fetchall()
-    obs_rows = con.execute(_observations_query(group_by_month=False)).fetchall()
+def _collect_cells(
+    con: duckdb.DuckDBPyConnection, group_ids: list[str], group_by_month: bool
+) -> dict[tuple, list[int]]:
+    """Celdas {(grupo, anio[, mes]): tupla-fila} combinando récords y cobertura.
 
-    anios: set[int] = set()
-    cells: dict[tuple[str, int], list[int]] = {}
+    Las filas SQL empiezan por el periodo (anio o anio+mes) seguido de
+    (grupo, es_total). Con `es_total` la fila es el rollup nacional ("total");
+    con grupo NULL sin ser total, la provincia no está en el lookup y se ignora.
+    """
+    nk = 2 if group_by_month else 1  # columnas de periodo
+    cells: dict[tuple, list[int]] = {}
 
-    def _get(group: str, anio: int) -> list[int]:
-        anios.add(anio)
-        return cells.setdefault((group, anio), list(_EMPTY_ROW))
+    def _key(row: tuple) -> tuple | None:
+        grupo = "total" if row[nk + 1] else row[nk]
+        if grupo is None or grupo not in group_ids:
+            return None
+        return (grupo, *(int(v) for v in row[:nk]))
 
-    for anio, grupo, abs_max, abs_min, mes_max, mes_min, n_max, n_min in rec_rows:
-        key = _group_key(grupo)
-        if key not in group_ids:
+    for row in con.execute(_records_query(group_by_month)).fetchall():
+        key = _key(row)
+        if key is None:
             continue
-        cell = _get(key, int(anio))
+        cell = cells.setdefault(key, list(_EMPTY_ROW))
+        abs_max, abs_min, mes_max, mes_min, n_max, n_min = row[nk + 2:]
         cell[_IDX["absolutoMax"]] = int(abs_max)
         cell[_IDX["absolutoMin"]] = int(abs_min)
         cell[_IDX["mensualMax"]]  = int(mes_max)
@@ -182,52 +188,27 @@ def _build_anual(con: duckdb.DuckDBPyConnection, group_ids: list[str]) -> tuple[
         cell[_IDX["estacionesBatieronMax"]] = int(n_max)
         cell[_IDX["estacionesBatieronMin"]] = int(n_min)
 
-    for anio, grupo, n in obs_rows:
-        key = _group_key(grupo)
-        if key not in group_ids:
+    for row in con.execute(_observations_query(group_by_month)).fetchall():
+        key = _key(row)
+        if key is None:
             continue
-        cell = _get(key, int(anio))
-        cell[_IDX["estacionesConDatos"]] = int(n)
+        cell = cells.setdefault(key, list(_EMPTY_ROW))
+        cell[_IDX["estacionesConDatos"]] = int(row[nk + 2])
 
-    sorted_anios = sorted(anios)
-    out: dict[str, list[list[int]]] = {}
-    for g in group_ids:
-        out[g] = [cells.get((g, y), list(_EMPTY_ROW)) for y in sorted_anios]
-    return sorted_anios, out
+    return cells
+
+
+def _build_anual(con: duckdb.DuckDBPyConnection, group_ids: list[str]) -> tuple[list[int], dict[str, list[list[int]]]]:
+    cells = _collect_cells(con, group_ids, group_by_month=False)
+    anios = sorted({anio for _, anio in cells})
+    out = {g: [cells.get((g, y), list(_EMPTY_ROW)) for y in anios] for g in group_ids}
+    return anios, out
 
 
 def _build_mensual(con: duckdb.DuckDBPyConnection, group_ids: list[str], anios: list[int]) -> tuple[list[list[int]], dict[str, list[list[int]]]]:
-    rec_rows = con.execute(_records_query(group_by_month=True)).fetchall()
-    obs_rows = con.execute(_observations_query(group_by_month=True)).fetchall()
-
-    cells: dict[tuple[str, int, int], list[int]] = {}
-
-    def _get(group: str, anio: int, mes: int) -> list[int]:
-        return cells.setdefault((group, anio, mes), list(_EMPTY_ROW))
-
-    for anio, mes, grupo, abs_max, abs_min, mes_max, mes_min, n_max, n_min in rec_rows:
-        key = _group_key(grupo)
-        if key not in group_ids:
-            continue
-        cell = _get(key, int(anio), int(mes))
-        cell[_IDX["absolutoMax"]] = int(abs_max)
-        cell[_IDX["absolutoMin"]] = int(abs_min)
-        cell[_IDX["mensualMax"]]  = int(mes_max)
-        cell[_IDX["mensualMin"]]  = int(mes_min)
-        cell[_IDX["estacionesBatieronMax"]] = int(n_max)
-        cell[_IDX["estacionesBatieronMin"]] = int(n_min)
-
-    for anio, mes, grupo, n in obs_rows:
-        key = _group_key(grupo)
-        if key not in group_ids:
-            continue
-        cell = _get(key, int(anio), int(mes))
-        cell[_IDX["estacionesConDatos"]] = int(n)
-
+    cells = _collect_cells(con, group_ids, group_by_month=True)
     eje: list[list[int]] = [[y, m] for y in anios for m in range(1, 13)]
-    out: dict[str, list[list[int]]] = {}
-    for g in group_ids:
-        out[g] = [cells.get((g, y, m), list(_EMPTY_ROW)) for y, m in eje]
+    out = {g: [cells.get((g, y, m), list(_EMPTY_ROW)) for y, m in eje] for g in group_ids}
     return eje, out
 
 
@@ -241,15 +222,17 @@ def _group_meta(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
             WHERE (o.tmin IS NOT NULL OR o.tmax IS NOT NULL)
               AND NOT COALESCE(o.provisional, FALSE)
         )
-        SELECT sg.grupo, COUNT(*) AS n
+        SELECT sg.grupo, GROUPING(sg.grupo) AS es_total, COUNT(*) AS n
         FROM station_groups sg
         JOIN activas USING (indicativo)
         GROUP BY GROUPING SETS ((sg.grupo), ())
     """).fetchall()
 
     counts: dict[str, int] = {}
-    for grupo, n in rows:
-        counts[_group_key(grupo)] = int(n)
+    for grupo, es_total, n in rows:
+        key = "total" if es_total else grupo
+        if key is not None:  # grupo NULL sin ser total = provincia sin mapear
+            counts[key] = int(n)
 
     # Reverse del lookup: grupo_id → lista de nombres AEMET. Necesario para
     # que la UI sepa qué provincias de stations.json corresponden a un grupo
@@ -302,7 +285,7 @@ def build(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging()
     argparse.ArgumentParser(description="Genera stats.json").parse_args(argv)
 
     con = connect()
