@@ -16,6 +16,7 @@ import sys
 from huggingface_hub import HfApi
 
 from extremos.config import HF_TARGET_REPO, OUTPUTS_DIR
+from extremos.hfutil import upload_folder_with_retry
 from extremos.logconf import setup_logging
 
 log = logging.getLogger("extremos.publish")
@@ -42,7 +43,8 @@ def main(argv: list[str] | None = None) -> None:
 
     api = HfApi()
     api.create_repo(args.repo, repo_type="dataset", exist_ok=True, private=False)
-    api.upload_folder(
+    upload_folder_with_retry(
+        api,
         folder_path=str(OUTPUTS_DIR),
         repo_id=args.repo,
         repo_type="dataset",

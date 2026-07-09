@@ -28,7 +28,8 @@ from huggingface_hub import HfApi, snapshot_download
 from extremos.backfill import PROGRESS_SQL
 from extremos.config import DB_PATH, HF_DB_REPO
 from extremos.db import connect
-from extremos.logconf import setup_logging
+from extremos.hfutil import upload_folder_with_retry
+from extremos.logconf import Run, setup_logging
 
 log = logging.getLogger("extremos.backup")
 
@@ -54,7 +55,8 @@ def backup(repo: str) -> None:
             total += sz
             log.info("  %s → %.1f MB", tbl, sz / 1e6)
         log.info("Subiendo %.1f MB a %s…", total / 1e6, repo)
-        api.upload_folder(
+        upload_folder_with_retry(
+            api,
             folder_path=str(tmp),
             repo_id=repo,
             repo_type="dataset",
@@ -104,10 +106,11 @@ def main(argv: list[str] | None = None) -> None:
     if not args.repo:
         raise SystemExit("EXTREMOS_HF_DB_REPO no configurado (dataset privado de backup).")
 
-    if args.restore:
-        restore(args.repo)
-    else:
-        backup(args.repo)
+    with Run("restore" if args.restore else "backup"):
+        if args.restore:
+            restore(args.repo)
+        else:
+            backup(args.repo)
 
 
 if __name__ == "__main__":
