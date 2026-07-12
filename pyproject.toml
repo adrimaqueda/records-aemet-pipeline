@@ -27,6 +27,7 @@ extremos-export   = "extremos.export:main"
 extremos-stats    = "extremos.stats:main"
 extremos-rankings = "extremos.rankings:main"
 extremos-publish  = "extremos.publish:main"
+extremos-notify   = "extremos.notify:main"
 extremos-backup   = "extremos.backup:main"
 extremos-daily    = "extremos.daily:main"
 

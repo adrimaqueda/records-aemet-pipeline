@@ -13,6 +13,9 @@ __pycache__/
 .env
 .env.local
 
+# Aviso Telegram
+src/extremos/notify.py
+
 # Logs
 *.log
 

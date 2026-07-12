@@ -1,4 +1,4 @@
-"""Orquesta el ciclo diario: fetch -> provisional -> records -> stats -> rankings -> export -> publish."""
+"""Orquesta el ciclo diario: fetch -> provisional -> records -> stats -> rankings -> export -> publish -> notify."""
 from __future__ import annotations
 
 from extremos.logconf import Run, setup_logging
@@ -7,12 +7,12 @@ from extremos.logconf import Run, setup_logging
 def main() -> None:
     setup_logging()
 
-    from extremos import export, fetch, provisional, publish, rankings, records, stats
+    from extremos import export, fetch, notify, provisional, publish, rankings, records, stats
 
-    with Run("daily", total=7) as run:
+    with Run("daily", total=8) as run:
         with run.step("fetch"):
             fetch.main(["--refresh-stations"])
-        with run.step("provisional (horario)"):
+        with run.step("provisional (horario + web)"):
             provisional.main([])
         with run.step("records"):
             records.main([])
@@ -24,6 +24,8 @@ def main() -> None:
             export.main([])
         with run.step("publish (HF)"):
             publish.main([])
+        with run.step("notify (Telegram)"):
+            notify.main([])
 
 
 if __name__ == "__main__":

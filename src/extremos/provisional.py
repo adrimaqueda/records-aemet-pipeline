@@ -1,33 +1,41 @@
-"""Récords provisionales a partir de la observación horaria en tiempo real.
+"""Récords provisionales mientras AEMET publica el diario definitivo.
 
-AEMET publica el diario climatológico con ~5 días de retraso (`INGEST_LAG_DAYS`),
+AEMET publica el diario climatológico con ~4-5 días de retraso (`INGEST_LAG_DAYS`),
 así que durante esa ventana no hay dato para los días más recientes. Este módulo
-descarga la observación convencional de las últimas ~24 h de todas las estaciones
-(`/observacion/convencional/todas`), la agrega a `tmax`/`tmin` por día y la inserta
-en `observations` marcada como `provisional = TRUE`.
+lo cubre con dos fuentes independientes, ambas insertadas en `observations` con
+`provisional = TRUE`:
 
-Reglas:
-- El día se calcula en hora local de Madrid (los extremos diarios son por día
-  natural local).
+1. **Horario OpenData** (`/observacion/convencional/todas`): registros horarios
+   de todas las estaciones, agregados a `tmax`/`tmin` por día natural local.
+   Pese a que AEMET documenta 24 h, en la práctica devuelve ~12-13 h (medido
+   2026-07-12 en vivo y contrastado con los volúmenes de los logs), de modo que
+   con el cron 2×/día (09:00 y 21:00) la unión de pasadas cubre el día justo,
+   SIN margen: una pasada perdida deja horas sin ver.
+2. **CSV de resumen de la web** (`webcsv.py`): extremos del día COMPLETO de los
+   últimos 7 días más el día en curso, ~830 estaciones por petición. Repara los
+   huecos que deja (1) — pasadas perdidas, ventana corta — y sigue funcionando
+   cuando opendata.aemet.es está caída (host distinto).
+
+Reglas comunes:
+- El día es el natural en hora local de Madrid (en la web, la "hora oficial").
 - Nunca se pisa un dato definitivo: si ya existe una fila no provisional para
-  (indicativo, fecha), se respeta. El resto se inserta/actualiza como provisional.
-- Cuando AEMET publique el diario definitivo de esos días, `fetch.py` lo escribe
-  con `provisional = FALSE` y reemplaza a la provisional por la PK.
-
-Como la API sólo cubre 24 h, cada pasada ve un día parcial. El cron corre 2×/día
-(09:00 y 21:00) y los extremos de un mismo día se acumulan entre pasadas (merge
-`GREATEST`/`LEAST`, ver `_insert_provisional`); el hueco de ~5 días se va cubriendo
-a medida que el cron corre y se reemplaza por el definitivo cuando llega.
+  (indicativo, fecha), se respeta. El resto se acumula como provisional con
+  merge `GREATEST`/`LEAST` (ver `_insert_provisional`), así el extremo del día
+  es el mejor visto entre TODAS las pasadas y fuentes.
+- Cuando AEMET publica el diario definitivo, `fetch.py` reemplaza la fila por
+  la PK (indicativo, fecha) con `provisional = FALSE`.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+from datetime import date, timedelta
 
 import duckdb
 import polars as pl
 
+from extremos import webcsv
 from extremos.aemet import AemetClient
 from extremos.config import PROVISIONAL_MAX_AGE_DAYS
 from extremos.db import connect
@@ -114,11 +122,11 @@ def _aggregate_daily(raw: list[dict]) -> pl.DataFrame:
 def _insert_provisional(con: duckdb.DuckDBPyConnection, agg: pl.DataFrame) -> int:
     """Acumula filas provisionales sin pisar ningún dato definitivo existente.
 
-    La API horaria sólo da 24 h, así que una pasada ve un día natural parcial. Con
-    varias pasadas al día (cron 2×/día) los extremos de un mismo día se van
-    refinando: en vez de reemplazar la fila, hacemos un merge `GREATEST`/`LEAST`
-    contra la provisional existente, de modo que el `tmax`/`tmin` del día es el
-    extremo sobre TODAS las horas vistas, no sólo las de la última ventana.
+    Una pasada puede ver un día natural parcial (la API horaria da ~12-13 h; el
+    CSV web del día en curso llega hasta su hora de actualización). En vez de
+    reemplazar la fila, hacemos un merge `GREATEST`/`LEAST` contra la provisional
+    existente, de modo que el `tmax`/`tmin` del día es el extremo sobre TODO lo
+    visto entre pasadas y fuentes, no sólo la última ventana.
     """
     if agg.is_empty():
         return 0
@@ -159,8 +167,42 @@ def _insert_provisional(con: duckdb.DuckDBPyConnection, agg: pl.DataFrame) -> in
     return int(written)
 
 
+def _dates_needing_web(con: duckdb.DuckDBPyConnection) -> list[date]:
+    """Días sin definitivo aún, acotados a la ventana del CSV web (hoy-7..hoy)."""
+    row = con.execute(
+        "SELECT MAX(fecha) FROM observations WHERE NOT COALESCE(provisional, FALSE)"
+    ).fetchone()
+    last = row[0] if row else None
+    hoy = date.today()
+    start = hoy - timedelta(days=7)
+    if last:
+        start = max(start, last + timedelta(days=1))
+    return [start + timedelta(days=i) for i in range((hoy - start).days + 1)]
+
+
+def run_web(con: duckdb.DuckDBPyConnection) -> int:
+    """Extremos del CSV web nacional para los días que aún no tienen definitivo."""
+    dates = _dates_needing_web(con)
+    if not dates:
+        log.info("CSV web: ningún día pendiente de definitivo; nada que pedir.")
+        return 0
+    log.info("Descargando resúmenes web de AEMET (%s → %s)…", dates[0], dates[-1])
+    agg = webcsv.daily_extremes(dates)
+    if agg.is_empty():
+        log.info("CSV web sin datos utilizables; nada que insertar.")
+        return 0
+    written = _insert_provisional(con, agg)
+    log.info(
+        "Provisionales (web): %d días-estación escritos (%d días, %d estaciones).",
+        written,
+        agg.select(pl.col("fecha").n_unique()).item(),
+        agg.select(pl.col("indicativo").n_unique()).item(),
+    )
+    return written
+
+
 def run(con: duckdb.DuckDBPyConnection, client: AemetClient) -> int:
-    log.info("Descargando observación horaria (últimas 24 h)…")
+    log.info("Descargando observación horaria de OpenData (~12-13 h)…")
     raw = client.realtime_observations()
     log.info("  %d registros horarios", len(raw))
 
@@ -193,12 +235,18 @@ def main(argv: list[str] | None = None) -> None:
     if purged:
         log.info("Provisionales caducados (sin confirmar) purgados: %d", purged)
 
+    # Las dos fuentes son independientes y ninguna debe tumbar el ciclo diario:
+    # si OpenData está caída, el CSV web (otro host) suele seguir vivo, y viceversa.
     try:
         with AemetClient() as client:
             run(con, client)
     except Exception:  # noqa: BLE001
-        # No queremos que un fallo del horario tumbe el ciclo diario completo.
-        log.exception("Fallo al calcular provisionales; se omiten en esta ejecución.")
+        log.exception("Fallo en el horario de OpenData; se omite en esta ejecución.")
+
+    try:
+        run_web(con)
+    except Exception:  # noqa: BLE001
+        log.exception("Fallo en el CSV web de AEMET; se omite en esta ejecución.")
 
 
 if __name__ == "__main__":

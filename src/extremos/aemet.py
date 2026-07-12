@@ -221,11 +221,14 @@ class AemetClient:
         )
 
     def realtime_observations(self) -> list[dict[str, Any]]:
-        """Observación convencional de las últimas ~24 h de todas las estaciones.
+        """Observación convencional reciente de todas las estaciones.
 
         Devuelve registros horarios (`idema`, `fint` en UTC, `ta`, `tamax`,
-        `tamin`, …). Es la fuente para reconstruir récords provisionales mientras
-        AEMET publica el diario definitivo (con ~5 días de retraso). Ojo: esta
-        API sólo cubre las últimas 24 h, no un rango histórico.
+        `tamin`, …). Es una de las fuentes de récords provisionales mientras
+        AEMET publica el diario definitivo (con ~4-5 días de retraso). Ojo: AEMET
+        documenta "últimas 24 horas", pero en la práctica devuelve ~12-13 h
+        (medido 2026-07-12; ~9.5k registros ≈ 12 h × ~800 estaciones también en
+        los logs de días previos). La ventana completa del día la cubre el CSV
+        web de resúmenes (`webcsv.py`).
         """
         return self.get("/api/observacion/convencional/todas")

@@ -41,8 +41,9 @@ uv run extremos-stats        # genera stats.json (agregados de la página /datos
 uv run extremos-rankings     # genera rankings.json (clasificaciones de la página /datos)
 uv run extremos-export       # genera los JSONs en outputs/
 uv run extremos-publish      # sube outputs/ al dataset HF de la app
+uv run extremos-notify       # avisa por Telegram de los récords batidos en la última pasada
 uv run extremos-backup       # respalda la DuckDB al dataset HF privado
-uv run extremos-daily        # fetch + provisional + records + stats + rankings + export + publish
+uv run extremos-daily        # fetch + provisional + records + stats + rankings + export + publish + notify
 ```
 
 ## Dónde viven los datos
@@ -80,10 +81,22 @@ uv run extremos-daily             # rellena el hueco, recalcula, exporta y publi
 ### Récords provisionales
 
 AEMET publica el diario climatológico con varios días de retraso (~4 según su
-FAQ oficial). Para no dejar el mapa "congelado" esos días, `extremos-provisional` descarga la
-observación **horaria** de las últimas 24 h (`/observacion/convencional/todas`),
-la agrega a `tmax`/`tmin` por día (hora local de Madrid) y la inserta en
-`observations` con `provisional = TRUE`. Esas filas:
+FAQ oficial). Para no dejar el mapa "congelado" esos días, `extremos-provisional`
+combina dos fuentes y las inserta en `observations` con `provisional = TRUE`:
+
+1. la observación **horaria** de OpenData (`/observacion/convencional/todas`),
+   agregada a `tmax`/`tmin` por día (hora local de Madrid). Ojo: aunque AEMET
+   documenta 24 h, en la práctica devuelve ~12-13 h, así que las dos pasadas del
+   cron cubren el día justo y sin margen;
+2. los **CSV de resumen diario de la web** (`webcsv.py`, www.aemet.es, sin
+   api_key): extremos del día completo de los últimos 7 días más el día en
+   curso, ~830 estaciones por petición. Repara pasadas perdidas del horario y
+   sigue vivo cuando OpenData se cae (host distinto). El CSV no trae indicativo:
+   el mapeo (nombre, provincia) → indicativo se scrapea del HTML del resumen y
+   se cachea en `data/web_station_map.json`.
+
+Ambas fuentes acumulan sobre la misma fila con merge `GREATEST`/`LEAST`. Esas
+filas:
 
 - nunca pisan un dato definitivo (anti-join por PK `indicativo, fecha`);
 - son reemplazadas por el diario definitivo cuando llega (con `provisional = FALSE`);

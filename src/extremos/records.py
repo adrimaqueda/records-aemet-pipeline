@@ -27,6 +27,14 @@ Genera dos tablas (drop+create cada vez, es barato):
   station_coverage(indicativo, datos_desde, datos_hasta, dias_con_datos, dias_ultimo_anio, activa)
     - activa: estación con ≥ ACTIVE_STATION_MIN_DAYS días reportados en los últimos 12 meses.
 
+Además genera record_events_new: los récords BATIDOS (valor_anterior no nulo)
+que no existían en la pasada anterior. `provisional` y `valor` forman parte de
+la clave del diff, así que cuando AEMET confirma un dato provisional el evento
+reaparece como récord definitivo nuevo (y si el dato confirmado ya no bate el
+récord, simplemente desaparece sin avisar). La consume `notify` para el aviso
+de Telegram. Si `record_events` no existía (primera pasada o DB reconstruida)
+se deja vacía para no avisar de todo el histórico de golpe.
+
 Semántica de los récords (siempre buscamos "el más alto"):
   - absoluto-max  → TMAX más alta jamás registrada en la estación (día más caluroso).
   - absoluto-min  → TMIN más alta jamás registrada en la estación (noche más cálida).
@@ -209,6 +217,23 @@ LEFT JOIN observations o
 ORDER BY c.indicativo, c.tipo, COALESCE(c.mes, 0), c.fecha;
 """
 
+NEW_EVENTS_SQL = """
+DROP TABLE IF EXISTS record_events_new;
+CREATE TABLE record_events_new AS
+SELECT e.*
+FROM record_events e
+WHERE e.valor_anterior IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM _prev_events p
+      WHERE p.indicativo = e.indicativo
+        AND p.tipo = e.tipo
+        AND p.mes IS NOT DISTINCT FROM e.mes
+        AND p.fecha = e.fecha
+        AND p.valor = e.valor
+        AND p.provisional = e.provisional
+  );
+"""
+
 COVERAGE_SQL = f"""
 DROP TABLE IF EXISTS station_coverage;
 CREATE TABLE station_coverage AS
@@ -230,9 +255,27 @@ GROUP BY indicativo;
 
 
 def compute(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    prev_exists = con.execute(
+        "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'record_events'"
+    ).fetchone()[0] > 0
+    if prev_exists:
+        con.execute("""
+            CREATE OR REPLACE TEMP TABLE _prev_events AS
+            SELECT indicativo, tipo, mes, fecha, valor, provisional
+            FROM record_events
+            WHERE valor_anterior IS NOT NULL
+        """)
+
     log.info("Calculando record_events…")
     con.execute(RECORD_EVENTS_SQL)
     n_events = con.execute("SELECT COUNT(*) FROM record_events").fetchone()[0]
+
+    if prev_exists:
+        con.execute(NEW_EVENTS_SQL)
+    else:
+        con.execute("DROP TABLE IF EXISTS record_events_new")
+        con.execute("CREATE TABLE record_events_new AS SELECT * FROM record_events WHERE FALSE")
+    n_new = con.execute("SELECT COUNT(*) FROM record_events_new").fetchone()[0]
 
     log.info("Calculando station_coverage…")
     con.execute(COVERAGE_SQL)
@@ -241,6 +284,7 @@ def compute(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 
     return {
         "events": n_events,
+        "new_events": n_new,
         "stations_with_data": n_cov,
         "active_stations": n_active,
     }
@@ -253,8 +297,9 @@ def main(argv: list[str] | None = None) -> None:
     con = connect()
     stats = compute(con)
     log.info(
-        "Récords listos: %d eventos · %d estaciones con datos · %d activas",
-        stats["events"], stats["stations_with_data"], stats["active_stations"],
+        "Récords listos: %d eventos (%d nuevos en esta pasada) · %d estaciones con datos · %d activas",
+        stats["events"], stats["new_events"],
+        stats["stations_with_data"], stats["active_stations"],
     )
 
 
