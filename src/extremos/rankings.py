@@ -27,20 +27,21 @@ Convenciones:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import sys
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
 import duckdb
 
 from extremos.config import OUTPUTS_DIR
 from extremos.db import connect
+from extremos.export import write_json
 from extremos.logconf import setup_logging
 
 log = logging.getLogger("extremos.rankings")
+
+# Todas las clasificaciones desempatan al final por indicativo: sin eso, dos
+# estaciones con el mismo valor y fecha cambiaban de orden entre pasadas.
 
 # Cuántas filas guardamos por tabla. Generosos: la app pagina/recorta.
 N_TOP = 10      # top absoluto y top por mes (por familia)
@@ -75,7 +76,7 @@ def _abs_vigente_fechas(con: duckdb.DuckDBPyConnection) -> dict[tuple[str, str],
                 ROW_NUMBER() OVER (PARTITION BY indicativo, tipo ORDER BY fecha DESC) AS rn
             FROM record_events
             WHERE tipo IN ('absoluto-max', 'absoluto-min')
-              AND NOT COALESCE(provisional, FALSE)
+              AND NOT provisional
         )
         SELECT indicativo, tipo, fecha FROM v WHERE rn = 1
         """
@@ -97,12 +98,12 @@ def _top_abs(con: duckdb.DuckDBPyConnection, tipo: str) -> list[dict[str, Any]]:
                 ) AS rn
             FROM record_events re
             JOIN station_coverage c USING (indicativo)
-            WHERE re.tipo = ? AND c.activa AND NOT COALESCE(re.provisional, FALSE)
+            WHERE re.tipo = ? AND c.activa AND NOT re.provisional
         )
         SELECT s.indicativo, s.nombre, s.provincia, s.altitud, ev.valor, ev.fecha
         FROM ev JOIN stations s USING (indicativo)
         WHERE ev.rn = 1
-        ORDER BY ev.valor DESC, ev.fecha
+        ORDER BY ev.valor DESC, ev.fecha, s.indicativo
         LIMIT ?
         """,
         [tipo, N_TOP],
@@ -131,12 +132,12 @@ def _top_mes(con: duckdb.DuckDBPyConnection, tipo: str,
                 ) AS rn
             FROM record_events re
             JOIN station_coverage c USING (indicativo)
-            WHERE re.tipo = ? AND c.activa AND NOT COALESCE(re.provisional, FALSE)
+            WHERE re.tipo = ? AND c.activa AND NOT re.provisional
         ),
         best AS (SELECT * FROM ev WHERE rn = 1),
         ranked AS (
             SELECT b.*, ROW_NUMBER() OVER (
-                PARTITION BY b.mes ORDER BY b.valor DESC, b.fecha
+                PARTITION BY b.mes ORDER BY b.valor DESC, b.fecha, b.indicativo
             ) AS pos
             FROM best b
         )
@@ -177,8 +178,8 @@ def _recientes(con: duckdb.DuckDBPyConnection,
         JOIN station_coverage c USING (indicativo)
         JOIN stations s USING (indicativo)
         WHERE re.valor_anterior IS NOT NULL AND c.activa
-          AND NOT COALESCE(re.provisional, FALSE)
-        ORDER BY re.fecha DESC, (re.valor - re.valor_anterior) DESC
+          AND NOT re.provisional
+        ORDER BY re.fecha DESC, (re.valor - re.valor_anterior) DESC, s.indicativo, re.tipo, re.mes
         LIMIT ?
         """,
         [N_REC],
@@ -210,12 +211,12 @@ def _longevos(con: duckdb.DuckDBPyConnection, tipo: str) -> list[dict[str, Any]]
                 ) AS rn
             FROM record_events re
             JOIN station_coverage c USING (indicativo)
-            WHERE re.tipo = ? AND c.activa AND NOT COALESCE(re.provisional, FALSE)
+            WHERE re.tipo = ? AND c.activa AND NOT re.provisional
         )
         SELECT s.indicativo, s.nombre, s.provincia, s.altitud, vig.valor, vig.fecha
         FROM vig JOIN stations s USING (indicativo)
         WHERE vig.rn = 1
-        ORDER BY vig.fecha ASC
+        ORDER BY vig.fecha, s.indicativo
         LIMIT ?
         """,
         [tipo, N_LONG],
@@ -237,9 +238,9 @@ def _mayor_salto(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
         JOIN station_coverage c USING (indicativo)
         JOIN stations s USING (indicativo)
         WHERE re.valor_anterior IS NOT NULL AND c.activa
-          AND NOT COALESCE(re.provisional, FALSE)
+          AND NOT re.provisional
           AND re.tipo IN ('absoluto-max', 'absoluto-min')
-        ORDER BY (re.valor - re.valor_anterior) DESC, re.fecha DESC
+        ORDER BY (re.valor - re.valor_anterior) DESC, re.fecha DESC, s.indicativo, re.tipo
         LIMIT ?
         """,
         [N_SALTO],
@@ -260,10 +261,10 @@ def _mas_activas(con: duckdb.DuckDBPyConnection, where: str, params: list[Any]) 
         JOIN station_coverage c USING (indicativo)
         JOIN stations s USING (indicativo)
         WHERE re.valor_anterior IS NOT NULL AND c.activa
-          AND NOT COALESCE(re.provisional, FALSE)
+          AND NOT re.provisional
           AND {where}
         GROUP BY 1, 2, 3
-        ORDER BY n DESC, s.nombre
+        ORDER BY n DESC, s.nombre, s.indicativo
         LIMIT ?
         """,
         [*params, N_ACT],
@@ -312,14 +313,9 @@ def main(argv: list[str] | None = None) -> None:
     con = connect()
     payload = build(con)
 
-    out_path: Path = OUTPUTS_DIR / "rankings.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    write_json(OUTPUTS_DIR / "rankings.json", payload)
     log.info("rankings.json escrito")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

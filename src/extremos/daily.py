@@ -1,4 +1,8 @@
-"""Orquesta el ciclo diario: fetch -> provisional -> records -> stats -> rankings -> export -> publish -> notify."""
+"""Orquesta el ciclo diario: fetch -> provisional -> records -> stats -> rankings -> export -> publish.
+
+Si existe el módulo local `notify` (no se publica en el repo), añade al final
+su aviso de los récords batidos en la pasada.
+"""
 from __future__ import annotations
 
 from extremos.logconf import Run, setup_logging
@@ -7,9 +11,14 @@ from extremos.logconf import Run, setup_logging
 def main() -> None:
     setup_logging()
 
-    from extremos import export, fetch, notify, provisional, publish, rankings, records, stats
+    from extremos import export, fetch, provisional, publish, rankings, records, stats
 
-    with Run("daily", total=8) as run:
+    try:
+        from extremos import notify
+    except ImportError:
+        notify = None
+
+    with Run("daily", total=8 if notify else 7) as run:
         with run.step("fetch"):
             fetch.main(["--refresh-stations"])
         with run.step("provisional (horario + web)"):
@@ -24,8 +33,9 @@ def main() -> None:
             export.main([])
         with run.step("publish (HF)"):
             publish.main([])
-        with run.step("notify (Telegram)"):
-            notify.main([])
+        if notify:
+            with run.step("notify"):
+                notify.main([])
 
 
 if __name__ == "__main__":

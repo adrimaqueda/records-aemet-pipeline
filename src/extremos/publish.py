@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 
 from huggingface_hub import HfApi
 
@@ -58,4 +57,4 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

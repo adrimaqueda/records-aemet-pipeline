@@ -13,9 +13,6 @@ __pycache__/
 .env
 .env.local
 
-# Aviso Telegram
-src/extremos/notify.py
-
 # Logs
 *.log
 
@@ -26,3 +23,7 @@ src/extremos/notify.py
 
 .claude/
 bitacora.html
+*.log.*
+
+# Aviso por Telegram: módulo local de la Pi, no se publica
+src/extremos/notify.py

@@ -16,49 +16,39 @@ Por cada grupo y cada año (o año+mes) calculamos:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import sys
 import unicodedata
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import duckdb
 
 from extremos.config import MIN_HISTORICO_YEAR, OUTPUTS_DIR
 from extremos.db import connect
+from extremos.export import write_json
 from extremos.logconf import setup_logging
-from extremos.provincias import PROVINCIA_NAMES, PROVINCIA_NORM, rows_for_duckdb
+from extremos.provincias import PROVINCIA_NAMES, PROVINCIA_NORM
 
 log = logging.getLogger("extremos.stats")
+
+# Suelo de los agregados: incluye el histórico previo a 1975 que rellena
+# `backfill_historico.py`. El eje de años se deriva de los datos.
+MIN_YEAR = MIN_HISTORICO_YEAR
 
 
 def _sort_key(s: str) -> str:
     """Clave de ordenación insensible a tildes ("Ávila" entre "Asturias" y "Badajoz")."""
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
 
-# Suelo de los agregados de /datos. Coincide con el del backfill histórico
-# per-estación (config.MIN_HISTORICO_YEAR): una vez rellenado el histórico previo
-# a 1975, los agregados nacionales/provinciales lo incluyen. El eje de años se
-# deriva de los datos, así que basta con bajar este suelo para que aparezcan.
-MIN_YEAR = MIN_HISTORICO_YEAR
-
 
 def _create_lookup(con: duckdb.DuckDBPyConnection) -> None:
-    """Crea una vista temporal `station_groups(indicativo, prov_id)`.
+    """Crea una vista temporal `station_groups(indicativo, grupo)`.
 
     La normalización colapsa BALEARES/ILLES BALEARS y SANTA CRUZ/STA. CRUZ
     bajo el mismo identificador estable.
     """
-    rows = rows_for_duckdb()
-    values = ",".join("(?, ?)" for _ in rows)
-    flat: list[str] = [v for pair in rows for v in pair]
-    con.execute(
-        f"CREATE OR REPLACE TEMP TABLE provincia_norm AS "
-        f"SELECT * FROM (VALUES {values}) t(provincia, prov_id)",
-        flat,
-    )
+    con.execute("CREATE OR REPLACE TEMP TABLE provincia_norm (provincia VARCHAR, prov_id VARCHAR)")
+    con.executemany("INSERT INTO provincia_norm VALUES (?, ?)", list(PROVINCIA_NORM.items()))
     con.execute("""
         CREATE OR REPLACE TEMP VIEW station_groups AS
         SELECT s.indicativo, pn.prov_id AS grupo
@@ -76,8 +66,7 @@ def _records_query(group_by_month: bool) -> str:
     mapear (ambas llevan grupo NULL); sin él, una provincia desconocida se
     confundiría con el total.
     """
-    month_select = ", base.mes" if group_by_month else ""
-    month_group = ", base.mes" if group_by_month else ""
+    mes = ", base.mes" if group_by_month else ""
     return f"""
         WITH base AS (
             SELECT
@@ -87,11 +76,11 @@ def _records_query(group_by_month: bool) -> str:
                 EXTRACT(month FROM r.fecha)::INTEGER AS mes
             FROM record_events r
             WHERE r.valor_anterior IS NOT NULL
-              AND NOT COALESCE(r.provisional, FALSE)
+              AND NOT r.provisional
               AND EXTRACT(year FROM r.fecha) >= {MIN_YEAR}
         )
         SELECT
-            base.anio{month_select},
+            base.anio{mes},
             sg.grupo,
             GROUPING(sg.grupo) AS es_total,
             COUNT(*) FILTER (WHERE base.tipo='absoluto-max') AS abs_max,
@@ -107,16 +96,15 @@ def _records_query(group_by_month: bool) -> str:
         FROM base
         JOIN station_groups sg USING (indicativo)
         GROUP BY GROUPING SETS (
-            (base.anio{month_group}, sg.grupo),
-            (base.anio{month_group})
+            (base.anio{mes}, sg.grupo),
+            (base.anio{mes})
         )
     """
 
 
 def _observations_query(group_by_month: bool) -> str:
     """Estaciones con datos de temperatura por (año[, mes], grupo)."""
-    month_select = ", base.mes" if group_by_month else ""
-    month_group = ", base.mes" if group_by_month else ""
+    mes = ", base.mes" if group_by_month else ""
     return f"""
         WITH base AS (
             SELECT
@@ -125,19 +113,19 @@ def _observations_query(group_by_month: bool) -> str:
                 EXTRACT(month FROM o.fecha)::INTEGER AS mes
             FROM observations o
             WHERE (o.tmin IS NOT NULL OR o.tmax IS NOT NULL)
-              AND NOT COALESCE(o.provisional, FALSE)
+              AND NOT o.provisional
               AND EXTRACT(year FROM o.fecha) >= {MIN_YEAR}
         )
         SELECT
-            base.anio{month_select},
+            base.anio{mes},
             sg.grupo,
             GROUPING(sg.grupo) AS es_total,
             COUNT(DISTINCT base.indicativo) AS n
         FROM base
         JOIN station_groups sg USING (indicativo)
         GROUP BY GROUPING SETS (
-            (base.anio{month_group}, sg.grupo),
-            (base.anio{month_group})
+            (base.anio{mes}, sg.grupo),
+            (base.anio{mes})
         )
     """
 
@@ -220,7 +208,7 @@ def _group_meta(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
             SELECT DISTINCT o.indicativo
             FROM observations o
             WHERE (o.tmin IS NOT NULL OR o.tmax IS NOT NULL)
-              AND NOT COALESCE(o.provisional, FALSE)
+              AND NOT o.provisional
         )
         SELECT sg.grupo, GROUPING(sg.grupo) AS es_total, COUNT(*) AS n
         FROM station_groups sg
@@ -291,16 +279,10 @@ def main(argv: list[str] | None = None) -> None:
     con = connect()
     payload = build(con)
 
-    out_path: Path = OUTPUTS_DIR / "stats.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    n_grupos = len(payload["grupos"])
-    n_anios = len(payload["anios"])
-    log.info("stats.json escrito (%d grupos, %d años)", n_grupos, n_anios)
+    write_json(OUTPUTS_DIR / "stats.json", payload)
+    log.info("stats.json escrito (%d grupos, %d años)",
+             len(payload["grupos"]), len(payload["anios"]))
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

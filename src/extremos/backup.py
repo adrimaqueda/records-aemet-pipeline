@@ -1,9 +1,9 @@
 """Respaldo y restauración de la DuckDB en un dataset HF privado.
 
-No subimos los 342 MB del `.duckdb`. Exportamos solo las tablas **fuente**
-(`observations`, `stations`, `backfill_progress`) a Parquet ZSTD (~75 MB en total):
-las derivadas (`record_events`, `station_coverage`) se reconstruyen con
-`extremos-records`. Eso minimiza el peso que se sube (la preocupación principal) y
+No subimos los ~400 MB del `.duckdb`. Exportamos solo las tablas **fuente**
+(`observations`, `stations` y las de progreso de los backfills) a Parquet ZSTD
+(~85 MB en total): las derivadas (`record_events`, `station_coverage`) se
+reconstruyen con `extremos-records`. Eso minimiza el peso que se sube (la preocupación principal) y
 da un punto de restauración para:
 
   - recuperar la Pi si muere la SD, sin re-backfill de horas;
@@ -19,13 +19,11 @@ from __future__ import annotations
 import argparse
 import logging
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
 
-from extremos.backfill import PROGRESS_SQL
 from extremos.config import DB_PATH, HF_DB_REPO
 from extremos.db import connect
 from extremos.hfutil import upload_folder_with_retry
@@ -34,7 +32,7 @@ from extremos.logconf import Run, setup_logging
 log = logging.getLogger("extremos.backup")
 
 # Tablas fuente que respaldamos (las derivadas se recalculan con `records`).
-SOURCE_TABLES = ("observations", "stations", "backfill_progress")
+SOURCE_TABLES = ("observations", "stations", "backfill_progress", "historico_progress")
 
 
 def backup(repo: str) -> None:
@@ -42,7 +40,6 @@ def backup(repo: str) -> None:
     api.create_repo(repo, repo_type="dataset", exist_ok=True, private=True)
 
     con = connect()
-    con.execute(PROGRESS_SQL)  # por si la DB se creó sin backfill previo
     tmp = Path(tempfile.mkdtemp(prefix="extremos-bk-"))
     try:
         total = 0
@@ -79,7 +76,6 @@ def restore(repo: str) -> None:
         repo_id=repo, repo_type="dataset", allow_patterns=["*.parquet"]
     ))
     con = connect()                 # crea el esquema vacío con sus PK
-    con.execute(PROGRESS_SQL)
     for tbl in SOURCE_TABLES:
         src = tmp / f"{tbl}.parquet"
         if not src.exists():
@@ -114,4 +110,4 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

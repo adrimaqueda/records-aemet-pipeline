@@ -9,11 +9,11 @@ exponencial ante 429, 5xx o errores de red.
 """
 from __future__ import annotations
 
-import json as _json
+import json
 import logging
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -26,9 +26,12 @@ from tenacity import (
     wait_exponential,
 )
 
-from extremos.config import AEMET_API_KEY, AEMET_BASE_URL, AEMET_RATE_LIMIT_PER_MIN
+from extremos.config import AEMET_API_KEY
 
 log = logging.getLogger("extremos.aemet")
+
+BASE_URL = "https://opendata.aemet.es/opendata"
+RATE_LIMIT_PER_MIN = 45
 
 # Techo de espera por intento. El servidor OpenData de AEMET devuelve 429 a
 # menudo aunque vayas por debajo de tu propio rate limit; cuando lo hace suele
@@ -112,16 +115,15 @@ class _RateLimiter:
 
 
 class AemetClient:
-    def __init__(self, api_key: str | None = None, *, timeout: float = 60.0) -> None:
-        self.api_key = api_key or AEMET_API_KEY
-        if not self.api_key:
+    def __init__(self) -> None:
+        if not AEMET_API_KEY:
             raise AemetError("AEMET_API_KEY no configurada")
         self._client = httpx.Client(
-            base_url=AEMET_BASE_URL,
-            headers={"api_key": self.api_key, "Accept": "application/json"},
-            timeout=timeout,
+            base_url=BASE_URL,
+            headers={"api_key": AEMET_API_KEY, "Accept": "application/json"},
+            timeout=60.0,
         )
-        self._limiter = _RateLimiter(AEMET_RATE_LIMIT_PER_MIN)
+        self._limiter = _RateLimiter(RATE_LIMIT_PER_MIN)
 
     def close(self) -> None:
         self._client.close()
@@ -138,8 +140,8 @@ class AemetClient:
         wait=_aemet_wait,
         retry=retry_if_exception(_should_retry),
     )
-    def _fetch_data_url(self, path: str) -> tuple[str, str | None]:
-        """Primera llamada: devuelve (datos_url, metadatos_url)."""
+    def _fetch_data_url(self, path: str) -> str:
+        """Primera llamada: devuelve la URL firmada de los datos."""
         self._limiter.acquire()
         r = self._client.get(path)
         if r.status_code == 429:
@@ -157,7 +159,7 @@ class AemetClient:
         datos = body.get("datos")
         if not datos:
             raise AemetError(f"Respuesta AEMET sin campo 'datos' en {path}: {body}")
-        return datos, body.get("metadatos")
+        return datos
 
     @retry(
         reraise=True,
@@ -174,45 +176,31 @@ class AemetClient:
         self._limiter.acquire()
         r = httpx.get(url, timeout=120.0)
         r.raise_for_status()
-        try:
-            return _json.loads(r.content.decode("latin-1"))
-        except UnicodeDecodeError:
-            return _json.loads(r.content.decode("utf-8", errors="replace"))
+        return json.loads(r.content.decode("latin-1"))
 
     def get(self, path: str) -> Any:
         """Patrón completo en dos pasos."""
-        datos_url, _ = self._fetch_data_url(path)
-        return self._fetch_payload(datos_url)
+        return self._fetch_payload(self._fetch_data_url(path))
 
-    def daily_observations(self, ini: str, fin: str) -> list[dict[str, Any]]:
-        """Diarios de todas las estaciones entre dos fechas (max 31 días).
-
-        `ini` y `fin` en formato YYYY-MM-DD; los formateamos al esquema AEMET.
-        """
-        ini_str = f"{ini}T00:00:00UTC"
-        fin_str = f"{fin}T23:59:59UTC"
-        path = (
-            f"/api/valores/climatologicos/diarios/datos"
-            f"/fechaini/{ini_str}/fechafin/{fin_str}/todasestaciones"
+    def _daily(self, ini: date, fin: date, scope: str) -> list[dict[str, Any]]:
+        return self.get(
+            "/api/valores/climatologicos/diarios/datos"
+            f"/fechaini/{ini}T00:00:00UTC/fechafin/{fin}T23:59:59UTC/{scope}"
         )
-        return self.get(path)
 
-    def station_daily(self, idema: str, ini: str, fin: str) -> list[dict[str, Any]]:
-        """Diarios de UNA estación entre dos fechas (max 6 meses por petición).
+    def daily_observations(self, ini: date, fin: date) -> list[dict[str, Any]]:
+        """Diarios de todas las estaciones entre dos fechas (máx. ~15 días)."""
+        return self._daily(ini, fin, "todasestaciones")
+
+    def station_daily(self, idema: str, ini: date, fin: date) -> list[dict[str, Any]]:
+        """Diarios de UNA estación entre dos fechas (máx. 6 meses por petición).
 
         A diferencia de `daily_observations` (todasestaciones, que en la práctica
         sólo cubre 1975→hoy), este endpoint por estación devuelve el histórico
         completo de la serie, que para algunas estaciones se remonta a ~1920. Es
-        la única vía para rellenar los años anteriores a 1975. `ini`/`fin` en
-        formato YYYY-MM-DD.
+        la única vía para rellenar los años anteriores a 1975.
         """
-        ini_str = f"{ini}T00:00:00UTC"
-        fin_str = f"{fin}T23:59:59UTC"
-        path = (
-            f"/api/valores/climatologicos/diarios/datos"
-            f"/fechaini/{ini_str}/fechafin/{fin_str}/estacion/{idema}"
-        )
-        return self.get(path)
+        return self._daily(ini, fin, f"estacion/{idema}")
 
     def inventory_stations(self) -> list[dict[str, Any]]:
         """Inventario actualizado de todas las estaciones."""

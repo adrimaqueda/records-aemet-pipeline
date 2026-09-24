@@ -31,8 +31,8 @@ Además genera record_events_new: los récords BATIDOS (valor_anterior no nulo)
 que no existían en la pasada anterior. `provisional` y `valor` forman parte de
 la clave del diff, así que cuando AEMET confirma un dato provisional el evento
 reaparece como récord definitivo nuevo (y si el dato confirmado ya no bate el
-récord, simplemente desaparece sin avisar). La consume `notify` para el aviso
-de Telegram. Si `record_events` no existía (primera pasada o DB reconstruida)
+récord, simplemente desaparece sin avisar). Sirve para avisar de los récords
+de cada pasada. Si `record_events` no existía (primera pasada o DB reconstruida)
 se deja vacía para no avisar de todo el histórico de golpe.
 
 Semántica de los récords (siempre buscamos "el más alto"):
@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 
 import duckdb
 
@@ -62,20 +61,19 @@ log = logging.getLogger("extremos.records")
 
 # ---------------------------------------------------------------------------
 # Cálculo de eventos de récord.
-# Estructura: una CTE por categoría que aplica MAX/MIN OVER excluyendo la fila
-# actual y se queda solo con las filas que mejoran el récord vigente; luego
-# añadimos LAG para los días transcurridos y unimos todo.
+# `serie` despliega cada observación en sus 4 categorías (tipo, mes, valor); una
+# sola ventana MAX OVER (excluyendo la fila actual) por categoría da el récord
+# vigente previo, y nos quedamos con las filas que lo mejoran.
 #
 # `maduro` decide si un evento cuenta como récord batido. Una serie es "madura"
 # cuando lleva ≥ RECORD_WARMUP_DAYS de calendario con datos desde el inicio de su
 # segmento de cobertura actual; un hueco de ≥ RECORD_GAP_RESET_DAYS días abre un
-# segmento nuevo (la serie se "reanuda" y vuelve a estrenarse). Los eventos no
-# maduros NO se cuentan como récords batidos (su `valor_anterior` se anula en
-# `unioned`), porque mientras la serie estrena su envolvente estacional casi todo
-# es "récord" por el simple avance estacional, y tras un hueco el récord vigente
-# puede ser un valor rancio fuera de temporada que dispara saltos ficticios. El
-# `prev` se sigue calculando sobre todo el histórico, así que el récord vigente
-# no se ve afectado: si el máximo se fijó antes de la madurez, sigue vigente.
+# segmento nuevo (la serie se "reanuda" y vuelve a estrenarse). A los eventos no
+# maduros se les anula `valor_anterior`, porque mientras la serie estrena su
+# envolvente estacional casi todo es "récord" por el simple avance estacional, y
+# tras un hueco el récord vigente puede ser un valor rancio fuera de temporada
+# que dispara saltos ficticios. El `prev` se sigue calculando sobre todo el
+# histórico, así que el récord vigente no se ve afectado.
 # ---------------------------------------------------------------------------
 
 RECORD_EVENTS_SQL = f"""
@@ -120,65 +118,37 @@ base AS (
     FROM observations o
     JOIN segmentos sg USING (indicativo, fecha)
 ),
-abs_max_e AS (
-    SELECT indicativo, fecha, seg_id, maduro, tmax AS valor,
-           MAX(tmax) OVER (
-               PARTITION BY indicativo ORDER BY fecha
-               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-           ) AS prev
-    FROM base WHERE tmax IS NOT NULL
-    QUALIFY prev IS NULL OR tmax > prev
+serie AS (
+    SELECT indicativo, fecha, seg_id, maduro, 'absoluto-max' AS tipo,
+           NULL::INTEGER AS mes, tmax AS valor FROM base
+    UNION ALL
+    SELECT indicativo, fecha, seg_id, maduro, 'absoluto-min', NULL, tmin FROM base
+    UNION ALL
+    SELECT indicativo, fecha, seg_id, maduro, 'mensual-max', mes, tmax FROM base
+    UNION ALL
+    SELECT indicativo, fecha, seg_id, maduro, 'mensual-min', mes, tmin FROM base
 ),
-abs_min_e AS (
-    -- TMIN más alta jamás registrada (noche más cálida).
-    SELECT indicativo, fecha, seg_id, maduro, tmin AS valor,
-           MAX(tmin) OVER (
-               PARTITION BY indicativo ORDER BY fecha
-               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-           ) AS prev
-    FROM base WHERE tmin IS NOT NULL
-    QUALIFY prev IS NULL OR tmin > prev
-),
-mes_max_e AS (
-    SELECT indicativo, fecha, seg_id, mes, maduro, tmax AS valor,
-           MAX(tmax) OVER (
-               PARTITION BY indicativo, mes ORDER BY fecha
-               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-           ) AS prev
-    FROM base WHERE tmax IS NOT NULL
-    QUALIFY prev IS NULL OR tmax > prev
-),
-mes_min_e AS (
-    -- TMIN más alta de cada mes calendario.
-    SELECT indicativo, fecha, seg_id, mes, maduro, tmin AS valor,
-           MAX(tmin) OVER (
-               PARTITION BY indicativo, mes ORDER BY fecha
-               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-           ) AS prev
-    FROM base WHERE tmin IS NOT NULL
-    QUALIFY prev IS NULL OR tmin > prev
-),
-unioned AS (
-    -- Mientras la serie no es madura anulamos valor_anterior: esos eventos no
-    -- cuentan como récords batidos (el valor sí queda como vigente).
-    SELECT indicativo, 'absoluto-max' AS tipo, fecha, seg_id, NULL::INTEGER AS mes, valor,
+eventos AS (
+    SELECT indicativo, tipo, fecha, seg_id, mes, valor,
+           -- Mientras la serie no es madura anulamos valor_anterior: esos
+           -- eventos no cuentan como récords batidos (el valor sí queda vigente).
            CASE WHEN maduro THEN prev END AS valor_anterior
-    FROM abs_max_e
-    UNION ALL
-    SELECT indicativo, 'absoluto-min', fecha, seg_id, NULL::INTEGER, valor,
-           CASE WHEN maduro THEN prev END FROM abs_min_e
-    UNION ALL
-    SELECT indicativo, 'mensual-max', fecha, seg_id, mes, valor,
-           CASE WHEN maduro THEN prev END FROM mes_max_e
-    UNION ALL
-    SELECT indicativo, 'mensual-min', fecha, seg_id, mes, valor,
-           CASE WHEN maduro THEN prev END FROM mes_min_e
+    FROM (
+        SELECT *,
+               MAX(valor) OVER (
+                   PARTITION BY indicativo, tipo, mes ORDER BY fecha
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+               ) AS prev
+        FROM serie
+        WHERE valor IS NOT NULL
+    )
+    WHERE prev IS NULL OR valor > prev
 ),
 collapsed AS (
     -- Los récords batidos (maduros, valor_anterior no nulo) pasan todos: cada uno
     -- es un peldaño real de la escalera.
     SELECT indicativo, tipo, fecha, mes, valor, valor_anterior
-    FROM unioned
+    FROM eventos
     WHERE valor_anterior IS NOT NULL
     UNION ALL
     -- Los eventos `inicial` (warm-up) de un mismo segmento se colapsan en UNO
@@ -189,16 +159,12 @@ collapsed AS (
     -- crece de forma monótona), así que sigue siendo el evento más reciente del
     -- segmento → `vigentes`/`mensuales` (que toman el último por fecha) no cambian.
     SELECT indicativo, tipo, fecha, mes, valor, valor_anterior
-    FROM (
-        SELECT *,
-               ROW_NUMBER() OVER (
-                   PARTITION BY indicativo, tipo, COALESCE(mes, 0), seg_id
-                   ORDER BY valor DESC, fecha DESC
-               ) AS rn
-        FROM unioned
-        WHERE valor_anterior IS NULL
-    )
-    WHERE rn = 1
+    FROM eventos
+    WHERE valor_anterior IS NULL
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY indicativo, tipo, mes, seg_id
+        ORDER BY valor DESC, fecha DESC
+    ) = 1
 )
 SELECT
     c.indicativo,
@@ -207,12 +173,12 @@ SELECT
     c.mes,
     c.valor,
     c.valor_anterior,
-    COALESCE(o.provisional, FALSE) AS provisional,
+    o.provisional,
     (c.fecha - LAG(c.fecha) OVER (
         PARTITION BY c.indicativo, c.tipo, c.mes ORDER BY c.fecha
     ))::INTEGER AS dias_desde_anterior
 FROM collapsed c
-LEFT JOIN observations o
+JOIN observations o
     ON o.indicativo = c.indicativo AND o.fecha = c.fecha
 ORDER BY c.indicativo, c.tipo, COALESCE(c.mes, 0), c.fecha;
 """
@@ -249,12 +215,12 @@ SELECT
 FROM observations
 -- La cobertura ("datos hasta", días con datos, estación activa) se mide sólo
 -- sobre el dato definitivo; los provisionales no cuentan como "actualizado".
-WHERE (tmax IS NOT NULL OR tmin IS NOT NULL) AND NOT COALESCE(provisional, FALSE)
+WHERE (tmax IS NOT NULL OR tmin IS NOT NULL) AND NOT provisional
 GROUP BY indicativo;
 """
 
 
-def compute(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+def compute(con: duckdb.DuckDBPyConnection) -> None:
     prev_exists = con.execute(
         "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'record_events'"
     ).fetchone()[0] > 0
@@ -268,40 +234,32 @@ def compute(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 
     log.info("Calculando record_events…")
     con.execute(RECORD_EVENTS_SQL)
-    n_events = con.execute("SELECT COUNT(*) FROM record_events").fetchone()[0]
-
     if prev_exists:
         con.execute(NEW_EVENTS_SQL)
     else:
-        con.execute("DROP TABLE IF EXISTS record_events_new")
-        con.execute("CREATE TABLE record_events_new AS SELECT * FROM record_events WHERE FALSE")
-    n_new = con.execute("SELECT COUNT(*) FROM record_events_new").fetchone()[0]
+        con.execute("CREATE OR REPLACE TABLE record_events_new AS "
+                    "SELECT * FROM record_events WHERE FALSE")
 
     log.info("Calculando station_coverage…")
     con.execute(COVERAGE_SQL)
-    n_cov = con.execute("SELECT COUNT(*) FROM station_coverage").fetchone()[0]
-    n_active = con.execute("SELECT COUNT(*) FROM station_coverage WHERE activa").fetchone()[0]
 
-    return {
-        "events": n_events,
-        "new_events": n_new,
-        "stations_with_data": n_cov,
-        "active_stations": n_active,
-    }
+    n_events, n_new, n_cov, n_active = con.execute("""
+        SELECT (SELECT COUNT(*) FROM record_events),
+               (SELECT COUNT(*) FROM record_events_new),
+               COUNT(*), COUNT(*) FILTER (WHERE activa)
+        FROM station_coverage
+    """).fetchone()
+    log.info(
+        "Récords listos: %d eventos (%d nuevos en esta pasada) · %d estaciones con datos · %d activas",
+        n_events, n_new, n_cov, n_active,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
     setup_logging()
     argparse.ArgumentParser(description="Recalcula tablas de récords").parse_args(argv)
-
-    con = connect()
-    stats = compute(con)
-    log.info(
-        "Récords listos: %d eventos (%d nuevos en esta pasada) · %d estaciones con datos · %d activas",
-        stats["events"], stats["new_events"],
-        stats["stations_with_data"], stats["active_stations"],
-    )
+    compute(connect())
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

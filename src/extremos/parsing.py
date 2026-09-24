@@ -74,6 +74,14 @@ def normalize_observation(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def normalize_observations(raws: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normaliza un lote descartando las filas sin indicativo o sin fecha."""
+    return [
+        n for r in raws
+        if (n := normalize_observation(r))["indicativo"] and n["fecha"]
+    ]
+
+
 def normalize_hourly(raw: dict[str, Any]) -> dict[str, Any]:
     """Normaliza una observación horaria de `/observacion/convencional/todas`.
 

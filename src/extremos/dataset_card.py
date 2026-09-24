@@ -14,6 +14,7 @@ from pathlib import Path
 
 import duckdb
 
+from extremos.config import HUECO_MIN_DIAS
 from extremos.provincias import PROVINCIA_NAMES
 
 _TEMPLATE = """---
@@ -126,7 +127,8 @@ Detalle de una estación: récords vigentes y el histórico de récords batidos.
 | `vigentes` | object | Récord **vigente** (el más alto jamás registrado): `absolutoMax`, `absolutoMin` |
 | `ultimoRecord` | object\\|null | Récord batido más reciente (cualquier tipo) |
 | `mensuales` | array[12] | Por mes (`mes` 1–12): `max` y `min` vigentes con su fecha. El récord mensual que coincide con el absoluto vigente lleva `abs: true` (clave omitida si es false) |
-| `eventos` | array | Timeline (desc por fecha) de **récords batidos** |
+| `eventos` | array | Timeline (desc por fecha) de la escalera completa de récords |
+| `sinDatos` | array | Huecos de cobertura de ≥@@HUECO_MIN@@ días: `{desde, hasta, dias}` |
 
 Cada entrada de `eventos`:
 
@@ -136,9 +138,10 @@ Cada entrada de `eventos`:
 | `tipo` | string | `absoluto-max` · `absoluto-min` · `mensual-max` · `mensual-min` |
 | `mes` | int\\|null | Mes 1–12 en los tipos mensuales; `null` en los absolutos |
 | `valor` | float | Temperatura del récord (°C) |
-| `valorAnterior` | float | Récord vigente justo antes |
-| `diasDesdeAnterior` | int | Días transcurridos desde el récord anterior de esa categoría |
-| `provisional` | bool | `true` si el dato proviene del horario en tiempo real (aún no definitivo) |
+| `valorAnterior` | float\\|null | Récord vigente justo antes; `null` si el evento no cuenta como batido |
+| `diasDesdeAnterior` | int\\|null | Días transcurridos desde el récord anterior de esa categoría |
+| `provisional` | bool | `true` si el dato proviene del tiempo real (aún no definitivo) |
+| `inicial` | bool | Solo presente (`true`) en los eventos que fijan el récord sin contar como batido: el primero de la serie y el del año de rodaje (ver abajo) |
 
 ```json
 {
@@ -159,7 +162,8 @@ Cada entrada de `eventos`:
   "eventos": [
     { "fecha": "2026-05-28", "tipo": "mensual-max", "mes": 5, "valor": 35.0, "valorAnterior": 34.7, "diasDesdeAnterior": 4032, "provisional": false }
     /* … */
-  ]
+  ],
+  "sinDatos": [{ "desde": "2012-03-01", "hasta": "2012-04-15", "dias": 46 }]
 }
 ```
 
@@ -336,7 +340,7 @@ def _figures(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
     anio_min, anio_max = con.execute(
         "SELECT MIN(EXTRACT(YEAR FROM fecha))::INTEGER, "
         "       MAX(EXTRACT(YEAR FROM fecha))::INTEGER "
-        "FROM observations WHERE NOT COALESCE(provisional, FALSE)"
+        "FROM observations WHERE NOT provisional"
     ).fetchone()
     hasta = con.execute("SELECT MAX(datos_hasta) FROM station_coverage").fetchone()[0]
     batidos = con.execute(
@@ -352,6 +356,7 @@ def _figures(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
         "@@HASTA@@": hasta.isoformat() if hasta else "—",
         "@@BATIDOS@@": batidos_es,
         "@@PROVINCIAS@@": str(len(PROVINCIA_NAMES)),
+        "@@HUECO_MIN@@": str(HUECO_MIN_DIAS),
         # stations.json + stats.json + rankings.json + una ficha por estación activa.
         "@@NFICHEROS@@": str(activas + 3),
         "@@GENERADO@@": datetime.now().astimezone().isoformat(timespec="seconds"),

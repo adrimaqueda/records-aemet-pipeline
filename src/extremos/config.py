@@ -12,63 +12,38 @@ DATA_DIR = PIPELINE_ROOT / "data"
 DB_PATH = DATA_DIR / "aemet.duckdb"
 OUTPUTS_DIR = PIPELINE_ROOT / "outputs"
 
-# Carga pipeline/.env si existe. No falla si no está (entornos como GitHub Actions
-# pasan las variables ya inyectadas).
+# Secretos y repos destino, desde el entorno o desde el .env del proyecto.
 load_dotenv(PIPELINE_ROOT / ".env")
 
-HF_SOURCE_REPO = "datania/aemet"
+AEMET_API_KEY = os.environ.get("AEMET_API_KEY", "")
 # Dataset PÚBLICO donde se publican los JSONs ligeros (~28 MB) que consume la app.
 HF_TARGET_REPO = os.environ.get("EXTREMOS_HF_REPO", "")
-# Dataset PRIVADO donde se respalda la DuckDB (como parquet de las tablas fuente,
-# ~75 MB). Sirve también para hacer bootstrap de la Pi sin re-backfill (ver backup.py).
+# Dataset PRIVADO donde se respalda la DuckDB (parquet de las tablas fuente).
 HF_DB_REPO = os.environ.get("EXTREMOS_HF_DB_REPO", "")
-
-AEMET_API_KEY = os.environ.get("AEMET_API_KEY", "")
-AEMET_BASE_URL = "https://opendata.aemet.es/opendata"
-AEMET_RATE_LIMIT_PER_MIN = 45
-
-# Año mínimo a considerar en el backfill DESDE DATANIA. datania sólo mirroriza de
-# forma continua a partir de 1975 (antes apenas tiene 1920-1922 sueltos), así que
-# este es el suelo del backfill bulk. El histórico previo a 1975 se rellena, por
-# estación, con `extremos-backfill-historico` (ver MIN_HISTORICO_YEAR).
-MIN_BACKFILL_YEAR = int(os.environ.get("EXTREMOS_MIN_YEAR", "1975"))
 
 # Suelo del backfill histórico per-estación (`backfill_historico.py`) y de los
 # agregados de la página /datos (`stats.py`). El endpoint por estación de AEMET
-# sirve diarios hasta ~1920 para las series más largas; antes no hay datos. Es
-# también el año desde el que los agregados nacionales/provinciales empiezan a
-# contar, una vez rellenado ese histórico.
-MIN_HISTORICO_YEAR = int(os.environ.get("EXTREMOS_MIN_HISTORICO_YEAR", "1920"))
-
-# Nº de ventanas semestrales consecutivas sin datos, yendo hacia atrás, tras las
-# que el backfill histórico da por agotada la serie de una estación y deja de
-# pedir años más antiguos (la estación aún no existía). 4 = 2 años, holgado para
-# no cortar una serie con un hueco temprano de un año.
-HISTORICO_EMPTY_STOP = int(os.environ.get("EXTREMOS_HISTORICO_EMPTY_STOP", "4"))
+# sirve diarios hasta ~1920 para las series más largas; antes no hay datos.
+MIN_HISTORICO_YEAR = 1920
 
 # Estación activa = al menos N días reportados en los últimos 12 meses.
-ACTIVE_STATION_MIN_DAYS = int(os.environ.get("EXTREMOS_ACTIVE_MIN_DAYS", "180"))
+ACTIVE_STATION_MIN_DAYS = 180
 
 # "Madurez" de una serie para que sus récords cuenten como batidos. Un récord
 # solo cuenta si la estación lleva ≥ RECORD_WARMUP_DAYS con datos desde que
 # empezó (o desde que se reanudó tras un hueco largo). Durante ese primer año la
 # serie aún está estableciendo su envolvente estacional: casi todo es "récord"
-# por el simple avance de las estaciones, no por un extremo real. Generaliza la
-# antigua regla del "primer año natural", que solo cubría el primer año de
-# CALENDARIO y se dejaba fuera arranques a mitad de año, series dispersas y
-# huecos (esto último inflaba los "mayores saltos": un récord nuevo se medía
-# contra una base rancia fijada antes del hueco). Ver records.py.
-RECORD_WARMUP_DAYS = int(os.environ.get("EXTREMOS_RECORD_WARMUP_DAYS", "365"))
+# por el simple avance de las estaciones, no por un extremo real. Ver records.py.
+RECORD_WARMUP_DAYS = 365
 # Un hueco de cobertura de ≥ este nº de días reinicia el contador de madurez: la
 # estación vuelve a estar "estrenándose" y su récord vigente puede ser un valor
 # fuera de temporada que ya no representa la envolvente real.
-RECORD_GAP_RESET_DAYS = int(os.environ.get("EXTREMOS_RECORD_GAP_RESET_DAYS", "180"))
+RECORD_GAP_RESET_DAYS = 180
 
 # Tamaño mínimo (en días) de un hueco de cobertura para exportarlo en el bloque
 # `sinDatos` de cada estación, que la app pinta como overlay sobre los gráficos.
-# Los huecos más cortos (la mitad son de 1 solo día) son invisibles en un eje de
-# años y solo añaden ruido y peso al JSON, así que no se exportan.
-HUECO_MIN_DIAS = int(os.environ.get("EXTREMOS_HUECO_MIN_DIAS", "7"))
+# Los huecos más cortos son invisibles en un eje de años y solo añaden peso.
+HUECO_MIN_DIAS = 7
 
 # AEMET publica las climatologías diarias con ~4 días de retraso (su FAQ oficial,
 # v1.4 jul-2025, §4.2: "aproximadamente 4 días"). Usamos 3, por debajo de ese
@@ -83,6 +58,4 @@ INGEST_LAG_DAYS = 3
 # AEMET ya debería haber publicado el definitivo; si no reemplazó la fila es que
 # la estación nunca reportó ese día. Debe ser holgadamente mayor que el retraso
 # real de AEMET para no borrar un provisional a punto de confirmarse.
-PROVISIONAL_MAX_AGE_DAYS = int(
-    os.environ.get("EXTREMOS_PROVISIONAL_MAX_AGE_DAYS", "15")
-)
+PROVISIONAL_MAX_AGE_DAYS = 15

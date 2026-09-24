@@ -20,29 +20,23 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from datetime import date
 
 import duckdb
 
 from extremos.aemet import AemetClient, AemetError, AemetNoData
-from extremos.config import HISTORICO_EMPTY_STOP, MIN_HISTORICO_YEAR
+from extremos.config import MIN_HISTORICO_YEAR
 from extremos.db import connect
 from extremos.ingest import insert_observations
 from extremos.logconf import setup_logging
-from extremos.parsing import normalize_observation
+from extremos.parsing import normalize_observations
 
 log = logging.getLogger("extremos.backfill_historico")
 
-PROGRESS_SQL = """
-CREATE TABLE IF NOT EXISTS historico_progress (
-    indicativo  VARCHAR PRIMARY KEY,
-    earliest    DATE,            -- día más antiguo bajado para la estación
-    n_rows      INTEGER,         -- filas nuevas/actualizadas insertadas
-    complete    BOOLEAN DEFAULT FALSE,
-    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-"""
+# Nº de ventanas semestrales consecutivas sin datos, yendo hacia atrás, tras las
+# que se da por agotada la serie de una estación (la estación aún no existía).
+# 4 = 2 años, holgado para no cortar una serie con un hueco temprano de un año.
+EMPTY_STOP = 4
 
 
 def _half_year_windows(from_year: int, to_year: int) -> list[tuple[date, date]]:
@@ -92,7 +86,7 @@ def _target_stations(
         WITH starts AS (
             SELECT indicativo, MIN(fecha) AS desde
             FROM observations
-            WHERE NOT COALESCE(provisional, FALSE)
+            WHERE NOT provisional
             GROUP BY indicativo
         )
         SELECT s.indicativo, s.desde
@@ -129,24 +123,13 @@ def backfill_station(
         if win_ini >= cutoff:
             continue
         try:
-            raw = client.station_daily(
-                indicativo, win_ini.isoformat(), win_fin.isoformat()
-            )
+            norm = normalize_observations(client.station_daily(indicativo, win_ini, win_fin))
         except AemetNoData:
-            consecutive_empty += 1
-            if consecutive_empty >= empty_stop:
-                log.info("    · %s: %d ventanas vacías seguidas; serie agotada",
-                         indicativo, consecutive_empty)
-                break
-            continue
+            norm = []
         except AemetError as e:
             log.warning("    · %s %s..%s: fallo AEMET: %s; sigo",
                         indicativo, win_ini, win_fin, e)
             continue
-        norm = [
-            n for r in raw
-            if (n := normalize_observation(r))["indicativo"] and n["fecha"]
-        ]
         if not norm:
             consecutive_empty += 1
             if consecutive_empty >= empty_stop:
@@ -167,9 +150,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument("--floor-year", type=int, default=MIN_HISTORICO_YEAR,
                    help=f"Año más antiguo a pedir (default: {MIN_HISTORICO_YEAR})")
-    p.add_argument("--empty-stop", type=int, default=HISTORICO_EMPTY_STOP,
+    p.add_argument("--empty-stop", type=int, default=EMPTY_STOP,
                    help=f"Ventanas vacías seguidas que agotan una serie "
-                        f"(default: {HISTORICO_EMPTY_STOP})")
+                        f"(default: {EMPTY_STOP})")
     p.add_argument("--limit", type=int, default=None,
                    help="Procesa como mucho N estaciones (para pruebas)")
     p.add_argument("--station", action="append", dest="stations",
@@ -184,12 +167,11 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
 
     con = connect()
-    con.execute(PROGRESS_SQL)
 
     if args.stations:
         rows = con.execute(
             "SELECT indicativo, MIN(fecha) FROM observations "
-            "WHERE indicativo IN ({}) AND NOT COALESCE(provisional, FALSE) "
+            "WHERE indicativo IN ({}) AND NOT provisional "
             "GROUP BY indicativo".format(",".join("?" * len(args.stations))),
             args.stations,
         ).fetchall()
@@ -226,7 +208,7 @@ def main(argv: list[str] | None = None) -> None:
                 inserted, earliest = backfill_station(
                     con, client, indicativo, cutoff, args.floor_year, args.empty_stop
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("Fallo en %s, continúo con la siguiente", indicativo)
                 continue
             con.execute(
@@ -246,4 +228,4 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

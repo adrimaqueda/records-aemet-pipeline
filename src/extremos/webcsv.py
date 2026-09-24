@@ -15,9 +15,10 @@ cruzar aparecen nombres sin mapear (estación nueva o renombrada) se reconstruye
 una vez y se reintenta.
 
 Ojo: endpoint web sin contrato (AEMET puede cambiarlo sin avisar). Por eso todo
-el parseo valida lo que asume (content-type CSV, nº de estaciones del mapeo,
-fecha declarada en el propio fichero) y el llamador lo trata como fuente
-prescindible: si algo no cuadra, se avisa y se sigue sin datos web.
+el parseo valida lo que asume (que llega un CSV y no la página HTML, nº de
+estaciones del mapeo, fecha declarada en el propio fichero) y el llamador lo
+trata como fuente prescindible: si algo no cuadra, se avisa y se sigue sin
+datos web.
 """
 from __future__ import annotations
 
@@ -83,6 +84,15 @@ def _get(client: httpx.Client, path: str, params: dict[str, str]) -> str:
     r = client.get(path, params=params)
     r.raise_for_status()
     return r.content.decode(_ENCODING, errors="replace")
+
+
+def _get_csv(client: httpx.Client, path: str, params: dict[str, str]) -> str:
+    text = _get(client, path, params)
+    # Si el export falla, AEMET responde 200 con su página HTML en vez del CSV
+    # (visto desde el 2026-09-21).
+    if text.lstrip().startswith("<"):
+        raise WebCsvError("AEMET sirvió HTML en lugar del CSV")
+    return text
 
 
 def _parse_fecha(line: str) -> date | None:
@@ -191,9 +201,8 @@ def _fetch_days(dates: list[date]) -> dict[date, list[dict]]:
                 log.warning("Día %s fuera de la ventana del CSV web (hoy-7..hoy); se omite.", d)
                 continue
             try:
-                text = _get(client, path, params)
-                declared, rows = _parse_summary(text)
-            except Exception as e:  # noqa: BLE001 — fuente prescindible, día a día
+                declared, rows = _parse_summary(_get_csv(client, path, params))
+            except Exception as e:  # fuente prescindible, día a día
                 log.warning("CSV web de %s no disponible: %s", d, e)
                 continue
             if not rows:
@@ -212,6 +221,24 @@ def _fetch_days(dates: list[date]) -> dict[date, list[dict]]:
     return out
 
 
+def _match(
+    by_date: dict[date, list[dict]], mapping: dict[tuple[str, str], str]
+) -> tuple[list[dict], set[tuple[str, str]]]:
+    """Cruza las filas con el mapeo → (filas con indicativo, (nombre, prov) sin mapear)."""
+    out, unmatched = [], set()
+    for fecha, rows in by_date.items():
+        for r in rows:
+            if r["tmax"] is None and r["tmin"] is None:
+                continue
+            key = (r["nombre"], r["provincia"])
+            if ind := mapping.get(key):
+                out.append({"indicativo": ind, "fecha": fecha,
+                            "tmax": r["tmax"], "tmin": r["tmin"]})
+            else:
+                unmatched.add(key)
+    return out, unmatched
+
+
 def daily_extremes(dates: list[date]) -> pl.DataFrame:
     """Extremos diarios web de los días pedidos → DF (indicativo, fecha, tmax, tmin).
 
@@ -222,28 +249,14 @@ def daily_extremes(dates: list[date]) -> pl.DataFrame:
     if not by_date:
         return pl.DataFrame()
 
-    mapping = _load_map()
-    for intento in ("cache", "refresco"):
-        out, unmatched = [], set()
-        for fecha, rows in by_date.items():
-            for r in rows:
-                if r["tmax"] is None and r["tmin"] is None:
-                    continue
-                ind = mapping.get((r["nombre"], r["provincia"]))
-                if not ind:
-                    unmatched.add((r["nombre"], r["provincia"]))
-                    continue
-                out.append({"indicativo": ind, "fecha": fecha,
-                            "tmax": r["tmax"], "tmin": r["tmin"]})
-        if not unmatched or intento == "refresco":
-            break
+    out, unmatched = _match(by_date, _load_map())
+    if unmatched:
         # Nombres sin mapear: el cache está desactualizado (estación nueva o
         # renombrada) o no existía. Un único refresco por pasada.
         try:
-            mapping = refresh_station_map()
-        except Exception as e:  # noqa: BLE001
+            out, unmatched = _match(by_date, refresh_station_map())
+        except Exception as e:
             log.warning("No se pudo refrescar el mapeo web: %s", e)
-            break
 
     if unmatched:
         log.warning(

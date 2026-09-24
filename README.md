@@ -33,7 +33,8 @@ Dataset público resultante: [`adrimaqueda/records-aemet`](https://huggingface.c
 ```bash
 cp .env.example .env         # y rellena AEMET_API_KEY, HF_TOKEN, etc.
 uv sync                      # instala dependencias
-uv run extremos-backfill     # one-shot: histórico desde HF datania
+uv run extremos-backfill     # one-shot: histórico 1975→hoy desde HF datania
+uv run extremos-backfill-historico  # one-shot: años anteriores a 1975, por estación
 uv run extremos-fetch        # incremental desde API AEMET
 uv run extremos-provisional  # récords provisionales desde el horario en tiempo real
 uv run extremos-records      # recalcula récords
@@ -41,9 +42,8 @@ uv run extremos-stats        # genera stats.json (agregados de la página /datos
 uv run extremos-rankings     # genera rankings.json (clasificaciones de la página /datos)
 uv run extremos-export       # genera los JSONs en outputs/
 uv run extremos-publish      # sube outputs/ al dataset HF de la app
-uv run extremos-notify       # avisa por Telegram de los récords batidos en la última pasada
 uv run extremos-backup       # respalda la DuckDB al dataset HF privado
-uv run extremos-daily        # fetch + provisional + records + stats + rankings + export + publish + notify
+uv run extremos-daily        # fetch + provisional + records + stats + rankings + export + publish
 ```
 
 ## Dónde viven los datos
@@ -51,17 +51,18 @@ uv run extremos-daily        # fetch + provisional + records + stats + rankings 
 | Qué | Tamaño | Dónde |
 |---|---|---|
 | JSONs de la app (`stations.json`, `stats.json`, `rankings.json`, `stations/*.json`) | ~28 MB | dataset HF **público** `EXTREMOS_HF_REPO`, servido por `resolve/main` |
-| `aemet.duckdb` (base de trabajo) | ~342 MB | **solo en la Pi** (gitignored); reconstruible |
-| Backup de la DuckDB (parquet ZSTD de tablas fuente) | ~75 MB | dataset HF **privado** `EXTREMOS_HF_DB_REPO` |
+| `aemet.duckdb` (base de trabajo) | ~400 MB | **solo en la Pi** (gitignored); reconstruible |
+| Backup de la DuckDB (parquet ZSTD de tablas fuente) | ~85 MB | dataset HF **privado** `EXTREMOS_HF_DB_REPO` |
 
 La app lee de HF en producción vía `VITE_DATA_BASE_URL` →
 `https://huggingface.co/datasets/<EXTREMOS_HF_REPO>/resolve/main`.
 
 ## Backup y bootstrap de la Pi
 
-El backup **no** sube los 342 MB del `.duckdb`. Exporta solo las tablas fuente
-(`observations`, `stations`, `backfill_progress`) a Parquet ZSTD (~75 MB); las
-derivadas (`record_events`, `station_coverage`) se recalculan con `records`.
+El backup **no** sube los ~400 MB del `.duckdb`. Exporta solo las tablas fuente
+(`observations`, `stations`, `backfill_progress`, `historico_progress`) a Parquet
+ZSTD (~85 MB); las derivadas (`record_events`, `station_coverage`) se recalculan
+con `records`.
 
 ```bash
 uv run extremos-backup            # exporta a parquet y sube a EXTREMOS_HF_DB_REPO
@@ -76,7 +77,8 @@ uv run extremos-backup --restore  # baja el parquet y reconstruye la DB
 uv run extremos-daily             # rellena el hueco, recalcula, exporta y publica
 ```
 
-(Alternativa desde cero, varias horas: `uv run extremos-backfill`.)
+(Alternativa desde cero, varias horas: `uv run extremos-backfill` y después
+`uv run extremos-backfill-historico` para los años anteriores a 1975.)
 
 ### Récords provisionales
 
@@ -134,10 +136,14 @@ El ciclo de actualización (`extremos-daily`) se ejecuta **dos veces al día, a 
 
 ```cron
 # Actualización: 09:00 y 21:00 todos los días
-0 9,21 * * * ~/records-aemet-pipeline/scripts/daily.sh  >> ~/records-aemet-pipeline/daily.log  2>&1
+0 9,21 * * * /usr/local/bin/cron-alert "Pipeline AEMET (daily)" /home/pi/records-aemet-pipeline/scripts/daily.sh >> /home/pi/records-aemet-pipeline/daily.log 2>&1
 # Backup de la DuckDB a HF privado: domingos a las 04:00
-0 4 * * 0   ~/records-aemet-pipeline/scripts/weekly.sh >> ~/records-aemet-pipeline/weekly.log 2>&1
+0 4 * * 0   /usr/local/bin/cron-alert "Backup DuckDB a HF (weekly)" /home/pi/records-aemet-pipeline/scripts/weekly.sh >> /home/pi/records-aemet-pipeline/weekly.log 2>&1
 ```
+
+`cron-alert` avisa por Telegram si el comando termina con error. Ambos scripts
+delegan en `scripts/run.sh`, que ejecuta `uv run <comando>` desde la raíz del
+proyecto (el `.env` lo carga `config.py`).
 
 AEMET no publica a una hora fija (la periodicidad declarada es "continuamente"),
 así que para el dato **definitivo** la hora es indiferente. Las dos pasadas
@@ -152,23 +158,32 @@ lo que el `tmax` de la tarde y el `tmin` de la madrugada se capturan ambos.
 records-aemet-pipeline/
 ├── pyproject.toml
 ├── src/extremos/
-│   ├── config.py       # rutas y constantes
-│   ├── db.py           # conexión DuckDB + esquema
-│   ├── backfill.py     # carga inicial desde HF
-│   ├── fetch.py        # incremental contra AEMET (diario)
-│   ├── provisional.py  # récords provisionales desde el horario en tiempo real
-│   ├── records.py      # cómputo de récords (SQL)
-│   ├── stats.py        # agregados para la página /datos (stats.json)
-│   ├── rankings.py     # clasificaciones para la página /datos (rankings.json)
-│   ├── export.py       # genera los JSONs en outputs/
-│   ├── dataset_card.py # genera la tarjeta (README) del dataset HF público
-│   ├── publish.py      # sube outputs/ al dataset HF público
-│   ├── backup.py       # backup/restore de la DuckDB en HF privado
-│   └── daily.py        # orquestador del cron
+│   ├── config.py             # rutas y constantes
+│   ├── db.py                 # conexión DuckDB + esquema de las tablas fuente
+│   ├── logconf.py            # logging común y delimitación de ejecuciones en el log
+│   ├── aemet.py              # cliente de la API OpenData (rate limit + reintentos)
+│   ├── parsing.py            # normalización de los formatos crudos de AEMET
+│   ├── ingest.py             # escritura de observaciones/estaciones en DuckDB
+│   ├── backfill.py           # carga inicial 1975→hoy desde HF datania
+│   ├── backfill_historico.py # histórico previo a 1975, estación a estación (one-shot)
+│   ├── fetch.py              # incremental contra AEMET (diario definitivo)
+│   ├── provisional.py        # récords provisionales (horario + CSV web)
+│   ├── webcsv.py             # extremos diarios desde los CSV de www.aemet.es
+│   ├── records.py            # cómputo de récords (SQL)
+│   ├── stats.py              # agregados para la página /datos (stats.json)
+│   ├── rankings.py           # clasificaciones para la página /datos (rankings.json)
+│   ├── provincias.py         # normalización y nombres de provincias
+│   ├── export.py             # genera los JSONs en outputs/
+│   ├── dataset_card.py       # genera la tarjeta (README) del dataset HF público
+│   ├── publish.py            # sube outputs/ al dataset HF público
+│   ├── hfutil.py             # subidas a HF con reintentos
+│   ├── backup.py             # backup/restore de la DuckDB en HF privado
+│   └── daily.py              # orquestador del cron
 ├── scripts/
-│   ├── daily.sh        # cron de actualización (2×/día)
-│   └── weekly.sh       # cron de backup (semanal)
-└── data/aemet.duckdb   # (gitignored) base local
+│   ├── run.sh                # lanzador común (uv run desde la raíz)
+│   ├── daily.sh              # cron de actualización (2×/día)
+│   └── weekly.sh             # cron de backup (semanal)
+└── data/aemet.duckdb         # (gitignored) base local
 ```
 
 ## Fuente y licencia de los datos

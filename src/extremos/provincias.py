@@ -127,7 +127,3 @@ PROVINCIA_NORM: dict[str, str] = {
     "ZARAGOZA": "zaragoza",
 }
 
-
-def rows_for_duckdb() -> list[tuple[str, str]]:
-    """Pares (provincia_aemet, provincia_id) listos para un VALUES en DuckDB."""
-    return list(PROVINCIA_NORM.items())
