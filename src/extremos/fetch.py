@@ -19,6 +19,7 @@ import logging
 from datetime import date, timedelta
 
 import duckdb
+import httpx
 
 from extremos.aemet import AemetClient, AemetError, AemetNoData
 from extremos.config import INGEST_LAG_DAYS
@@ -92,9 +93,21 @@ def main(argv: list[str] | None = None) -> None:
     with AemetClient() as client:
         if args.refresh_stations:
             log.info("Refrescando inventario de estaciones…")
-            raw = client.inventory_stations()
-            n = insert_stations(con, [normalize_station(r) for r in raw if r.get("indicativo")])
-            log.info("Estaciones refrescadas: %d", n)
+            try:
+                raw = client.inventory_stations()
+            except (httpx.HTTPError, AemetError) as exc:
+                # El inventario cambia muy poco: si AEMET falla, seguimos con el
+                # que ya hay en la DB. Solo es fatal si la tabla está vacía.
+                (n_prev,) = con.execute("SELECT count(*) FROM stations").fetchone()
+                if not n_prev:
+                    raise
+                log.warning(
+                    "No se pudo refrescar el inventario (%s); se usa el existente (%d estaciones).",
+                    exc, n_prev,
+                )
+            else:
+                n = insert_stations(con, [normalize_station(r) for r in raw if r.get("indicativo")])
+                log.info("Estaciones refrescadas: %d", n)
         total = fetch_range(con, client, start, end)
 
     log.info("Fetch incremental terminado. %d observaciones nuevas/actualizadas.", total)
